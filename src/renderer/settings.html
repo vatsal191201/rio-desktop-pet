@@ -60,8 +60,12 @@
       <input id="biteCursor" type="checkbox" />
     </div>
     <div class="row">
-      <div><label>React to typing</label><div class="hint">taps along · overheats if fast (needs Accessibility)</div></div>
+      <div><label>React to typing</label><div class="hint">taps along · overheats if fast · spins on scroll</div></div>
       <input id="reactKeyboard" type="checkbox" />
+    </div>
+    <div class="row" id="accessRow" style="display:none">
+      <div><label>Accessibility access</label><div class="hint" id="accessHint">needed for typing &amp; scroll reactions</div></div>
+      <button id="grantAccess" class="ghost" type="button">Grant…</button>
     </div>
     <div class="row">
       <div><label>Sounds</label><div class="hint">little barks &amp; yips (off by default)</div></div>
@@ -102,7 +106,14 @@
     $('agentEnabled').checked = !!cur.agentEnabled;
     $('agentPort').value = cur.agentPort || 4279;
     renderHook();
+    updateAccess(cur.accessTrusted, cur.reactKeyboard);
   }
+  function updateAccess(trusted, on) {
+    $('accessRow').style.display = on ? 'flex' : 'none';
+    $('accessHint').textContent = trusted ? 'granted ✓ — Rio feels your keystrokes' : 'needed for typing & scroll reactions';
+    $('grantAccess').style.display = trusted ? 'none' : 'inline-block';
+  }
+  async function refreshAccess() { const s = await window.rioSettings.get(); updateAccess(s.accessTrusted, s.reactKeyboard); return s.accessTrusted; }
   function renderHook() {
     const port = $('agentPort').value || 4279;
     $('hookCmd').textContent = 'node "' + cur.appDir + '/tools/install-claude-hook.js" --port ' + port;
@@ -112,7 +123,11 @@
   $('scale').addEventListener('change', e => save({ scale: parseFloat(e.target.value) }));
   $('followCursor').addEventListener('change', e => save({ followCursor: e.target.checked }));
   $('biteCursor').addEventListener('change', e => save({ biteCursor: e.target.checked }));
-  $('reactKeyboard').addEventListener('change', e => save({ reactKeyboard: e.target.checked }));
+  $('reactKeyboard').addEventListener('change', async e => { await save({ reactKeyboard: e.target.checked }); refreshAccess(); });
+  $('grantAccess').addEventListener('click', async () => {
+    await window.rioSettings.grantAccess();
+    let n = 0; const iv = setInterval(async () => { const ok = await refreshAccess(); if (ok || ++n > 20) clearInterval(iv); }, 1500);
+  });
   $('sound').addEventListener('change', e => save({ mute: !e.target.checked }));
   $('agentEnabled').addEventListener('change', e => save({ agentEnabled: e.target.checked }));
   $('agentPort').addEventListener('change', e => { save({ agentPort: parseInt(e.target.value, 10) || 4279 }); renderHook(); });

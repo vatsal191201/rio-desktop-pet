@@ -95,10 +95,17 @@ Menu‑bar paw → **Settings…**:
 Stored locally in your user‑data folder. No telemetry, ever.
 
 ### Optional: typing & scroll reactions
-These need the optional [`uiohook-napi`](https://www.npmjs.com/package/uiohook-napi)
-module (installed automatically) **and** macOS Accessibility permission
-(System Settings → Privacy & Security → Accessibility → enable the app/terminal).
-Without it, Rio simply ignores typing/scrolling — everything else still works.
+With **React to typing** on (default), Rio taps along as you type, **overheats**
+(panting + sweat) if you type fast, and **spins** when you scroll. This uses the
+optional [`uiohook-napi`](https://www.npmjs.com/package/uiohook-napi) module
+(installed automatically) and needs **macOS Accessibility** permission.
+
+The first time, Rio asks for it and opens the right settings pane — enable the
+app there (or your terminal, if you're running via `npm start`) under **System
+Settings → Privacy & Security → Accessibility**. You can also grant it any time
+from **Settings… → Grant…** or the menu‑bar **Grant typing access…** item. The
+moment it's granted Rio starts reacting — no restart needed. Without it he just
+ignores typing/scrolling, and everything else still works.
 
 ### Multi‑monitor
 Rio roams across all your displays and steps onto each monitor's floor

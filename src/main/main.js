@@ -6,7 +6,7 @@
 // current behaviour state + cursor into Rio's animated pixels). They talk over
 // a tiny IPC surface defined in preload.js.
 
-const { app, BrowserWindow, screen, ipcMain, Tray, Menu, nativeImage, globalShortcut, shell } = require('electron');
+const { app, BrowserWindow, screen, ipcMain, Tray, Menu, nativeImage, globalShortcut, shell, systemPreferences } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
@@ -27,7 +27,7 @@ const SETTINGS_FILE = () => path.join(app.getPath('userData'), 'rio-settings.jso
 const DEFAULTS = {
   name: 'friend', scale: 1.5, mute: true, followCursor: true,
   biteCursor: true, reactKeyboard: true, stretchEvery: 25,
-  agentEnabled: true, agentPort: 4279,
+  agentEnabled: true, agentPort: 4279, accessPrompted: false,
 };
 let settings = { ...DEFAULTS };
 function loadSettings() {
@@ -484,7 +484,10 @@ function rebuildTray() {
     { label: 'Bite at the cursor', type: 'checkbox', checked: settings.biteCursor,
       click: (mi) => { settings.biteCursor = mi.checked; saveSettings(); } },
     { label: 'React to typing', type: 'checkbox', checked: settings.reactKeyboard,
-      click: (mi) => { settings.reactKeyboard = mi.checked; saveSettings(); restartInputHooks(); } },
+      click: (mi) => { settings.reactKeyboard = mi.checked; saveSettings(); restartInputHooks(); rebuildTray();
+        if (mi.checked && !accessibilityTrusted()) grantAccessibility(); } },
+    ...(settings.reactKeyboard && !accessibilityTrusted()
+      ? [{ label: 'Grant typing access…', click: grantAccessibility }] : []),
     { label: 'Sounds', type: 'checkbox', checked: !settings.mute,
       click: (mi) => { settings.mute = !mi.checked; saveSettings(); pushConfig(); } },
     { label: 'React to Claude Code', type: 'checkbox', checked: settings.agentEnabled,
@@ -528,7 +531,8 @@ function openSettings() {
   settingsWin.loadFile(path.join(__dirname, '..', 'renderer', 'settings.html'));
   settingsWin.on('closed', () => { settingsWin = null; });
 }
-ipcMain.handle('rio:settings-get', () => ({ ...settings, port: settings.agentPort, appDir: path.join(__dirname, '..', '..') }));
+ipcMain.handle('rio:settings-get', () => ({ ...settings, port: settings.agentPort, appDir: path.join(__dirname, '..', '..'), accessTrusted: accessibilityTrusted() }));
+ipcMain.handle('rio:grant-access', () => { grantAccessibility(); return { trusted: accessibilityTrusted() }; });
 ipcMain.handle('rio:settings-set', (_e, patch) => {
   const sizeChanged = patch.scale != null && patch.scale !== settings.scale;
   settings = { ...settings, ...patch };
@@ -590,6 +594,20 @@ function onAgentEvent(data) {
 // missing. Everything else keeps working.
 // ---------------------------------------------------------------------------
 let uio = null, uioOn = false, keyTimes = [];
+
+// macOS Accessibility permission — global input taps stay silent without it.
+function accessibilityTrusted() {
+  if (process.platform !== 'darwin') return true;
+  try { return systemPreferences.isTrustedAccessibilityClient(false); } catch { return true; }
+}
+function promptAccessibility() {              // shows the system "grant access" dialog
+  try { if (process.platform === 'darwin') systemPreferences.isTrustedAccessibilityClient(true); } catch {}
+}
+function openAccessibilitySettings() {
+  try { shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'); } catch {}
+}
+function grantAccessibility() { promptAccessibility(); openAccessibilitySettings(); }
+
 function startInputHooks() {
   if (!settings.reactKeyboard || uioOn) return;
   try { uio = uio || require('uiohook-napi'); } catch { uio = null; return; }
@@ -605,13 +623,31 @@ function startInputHooks() {
     u.on('wheel', () => { if (brain && !brain.dragging) brain.scrollUntil = now() + 450; });
     u.start();
     uioOn = true; log('input hooks on');
-  } catch (e) { uioOn = false; log('input hooks failed', e && e.message); }
+  } catch (e) { uioOn = false; log('input hooks failed', e && e.message); return; }
+  // First time the feature runs without permission, walk the user through it once.
+  if (process.platform === 'darwin' && !accessibilityTrusted() && !settings.accessPrompted) {
+    settings.accessPrompted = true; saveSettings();
+    if (brain) say("let me watch your typing? grant Accessibility 🐾", 6000);
+    setTimeout(grantAccessibility, 900);
+  }
 }
 function stopInputHooks() {
   try { if (uio && uioOn) { uio.uIOhook.removeAllListeners && uio.uIOhook.removeAllListeners(); uio.uIOhook.stop(); } } catch {}
   uioOn = false;
 }
 function restartInputHooks() { stopInputHooks(); startInputHooks(); }
+
+// Watch for the permission being granted and switch the hooks on live (no restart).
+let lastTrusted = false;
+function watchAccessibility() {
+  lastTrusted = accessibilityTrusted();
+  setInterval(() => {
+    if (process.platform !== 'darwin' || !settings.reactKeyboard) return;
+    const t = accessibilityTrusted();
+    if (t && !lastTrusted) { restartInputHooks(); if (brain) say('yay — now i feel your keystrokes! ⌨️', 3000); }
+    lastTrusted = t;
+  }, 3000);
+}
 
 // ---------------------------------------------------------------------------
 // Tray + app lifecycle.
@@ -636,6 +672,7 @@ app.whenReady().then(() => {
   makeTray();
   startAgentServer();
   startInputHooks();
+  watchAccessibility();
   setInterval(loop, 1000 / 60);
 
   // periodic stretch-break nudge — a literal downward dog to remind you too
