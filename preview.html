@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>rio</title>
+<style>html,body{margin:0;background:#3b4654;}canvas{image-rendering:pixelated;display:block;}</style>
+</head><body>
+<canvas id="sheet" width="1000" height="820"></canvas>
+<script src="src/renderer/rio.js"></script>
+<script>
+const BW=72,BH=60,BX=37,BASE=50;
+const POSES = [
+  ['idle', p => {}],
+  ['blink', p => { p.blink=1; }],
+  ['walk a', p => { p.step=1; p.legPhase=0; p.tail=0.4; p.ear=0.4; }],
+  ['walk b', p => { p.step=1; p.legPhase=0.25; p.bob=-1; p.tail=-0.3; p.ear=0.1; }],
+  ['run', p => { p.step=1.3; p.legPhase=0.2; p.lift=3; p.sx=1.12; p.sy=0.9; p.ear=1; p.tail=0.8; p.mouth=0.5; p.tongue=0.7; }],
+  ['sit', p => { p.sit=1; p.tail=0.5; p.ear=0.3; }],
+  ['sit pant', p => { p.sit=1; p.mouth=0.7; p.tongue=0.9; p.ear=0.2; p.tail=0.3; }],
+  ['GIVE PAW', p => { p.sit=1; p.pawUp=1; p.mouth=0.5; p.tongue=0.5; p.ear=0.2; p.tail=0.6; }],
+  ['BEG', p => { p.sit=1; p.beg=1; p.mouth=0.5; p.tongue=0.6; p.ear=0.1; }],
+  ['STRETCH', p => { p.stretch=1; }],
+  ['PLAY BOW', p => { p.playbow=1; p.heart=1; }],
+  ['DIG', p => { p.dig=1; p.digPhase=1.2; p.headDy=3; p.ear=0.4; }],
+  ['OVERHEAT', p => { p.sit=1; p.mouth=0.9; p.tongue=1; p.overheat=1; p.ear=0.5; }],
+  ['BITE', p => { p.lift=8; p.mouth=1; p.tongue=0.3; p.ear=-0.6; p.sy=1.15; p.sx=0.9; p.headDx=3; }],
+  ['SCRATCH', p => { p.sit=1; p.scratch=1; p.scratchPhase=1.2; p.ear=0.6; p.mouth=0.4; p.tongue=0.5; }],
+  ['ROLL OVER', p => { p.rollOver=1; p.heart=1; }],
+  ['CURL NAP', p => { p.curl=1; p.zzz=0.9; }],
+  ['lie sleep', p => { p.lie=1; p.blink=1; p.zzz=0.9; p.ear=0.8; }],
+  ['bark', p => { p.mouth=1; p.tongue=0.4; p.sx=0.95; p.sy=1.1; p.ear=-0.6; p.headDx=2; }],
+  ['look up', p => { p.headTilt=0.5; p.headDy=-2; p.ear=-0.3; p.eyeDy=-1; }],
+  ['happy wag', p => { p.tail=1; p.heart=1; p.mouth=0.6; p.tongue=0.8; p.ear=0.5; }],
+  ['dragged', p => { p.lift=10; p.ear=1; p.tongue=0.8; p.mouth=0.3; p.blink=0.2; }],
+  ['sparkle', p => { p.sit=1; p.sparkle=1; p.mouth=0.5; p.tongue=0.6; p.tail=0.6; }],
+  ['face left', p => { p.facing=-1; p.tail=0.4; p.mouth=0.4; p.tongue=0.5; }],
+];
+const COLS=5, CW=200, CH=160, S=2; // 5*200=1000 ; rows = ceil(18/5)=4 -> 640
+const sheet=document.getElementById('sheet'), g=sheet.getContext('2d');
+g.imageSmoothingEnabled=false;
+function ell(c,x,y,rx,ry,col){Rio._helpers.ell(c,x,y,rx,ry,col);}
+const buf=document.createElement('canvas'); buf.width=BW; buf.height=BH;
+const bx=buf.getContext('2d');
+POSES.forEach((pp,i)=>{
+  const [lab,fn]=pp;
+  const col=i%COLS, row=(i/COLS)|0;
+  const ox=col*CW, oy=row*CH;
+  // checker bg
+  for(let yy=0;yy<CH;yy+=20)for(let xx=0;xx<CW;xx+=20){
+    g.fillStyle=((xx/20+yy/20)&1)?'#c4cdd6':'#b2bcc7'; g.fillRect(ox+xx,oy+yy,20,20);
+  }
+  bx.clearRect(0,0,BW,BH); bx.imageSmoothingEnabled=false;
+  const p=Rio.defaultPose(); fn(p);
+  const ssx = p.lift?Math.max(0.45,1-p.lift/14):1;
+  ell(bx, BX-2, BASE+2, 13*ssx*(p.sx||1), 3.0*ssx, 'rgba(20,15,20,0.26)');
+  Rio.draw(bx, BX, BASE, p, 600);
+  // draw buffer centered & scaled into cell
+  const dw=BW*S, dh=BH*S;
+  g.drawImage(buf, 0,0,BW,BH, ox+(CW-dw)/2, oy+(CH-dh)/2-6, dw, dh);
+  g.fillStyle='#0d1420'; g.font='13px monospace'; g.textBaseline='top';
+  g.fillText(lab, ox+6, oy+6);
+});
+document.title='rio ready';
+</script></body></html>

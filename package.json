@@ -1,0 +1,50 @@
+{
+  "name": "rio-desktop-pet",
+  "version": "1.0.0",
+  "description": "Rio — a pixel-art desktop dog companion that lives on your screen. A dog-flavored homage to comnyang.",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "icons": "node tools/gen-icons.js",
+    "install-hook": "node tools/install-claude-hook.js",
+    "uninstall-hook": "node tools/install-claude-hook.js --uninstall",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "author": "vatsal191201",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^42.4.1",
+    "electron-builder": "^25.1.8"
+  },
+  "optionalDependencies": {
+    "uiohook-napi": "^1.5.4"
+  },
+  "build": {
+    "appId": "com.rio.desktop-pet",
+    "productName": "Rio",
+    "asar": false,
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "tools/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.entertainment",
+      "icon": "build/icon.png",
+      "identity": null
+    },
+    "dmg": {
+      "title": "Rio 🐾"
+    }
+  }
+}

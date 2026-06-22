@@ -1,0 +1,677 @@
+// main.js — Rio the desktop dog. Owns the window, the brain, and the world.
+//
+// Architecture: MAIN is the brain + muscle (window position, locomotion,
+// behaviour state machine, global cursor, click-through, drag physics, tray,
+// the Claude Code agent server). The RENDERER is the body (it turns the
+// current behaviour state + cursor into Rio's animated pixels). They talk over
+// a tiny IPC surface defined in preload.js.
+
+const { app, BrowserWindow, screen, ipcMain, Tray, Menu, nativeImage, globalShortcut, shell } = require('electron');
+const path = require('node:path');
+const fs = require('node:fs');
+const http = require('node:http');
+
+const DEV = process.argv.includes('--dev');
+const log = (...a) => { if (DEV) console.log('[rio]', ...a); };
+
+// ---------------------------------------------------------------------------
+// Single-instance lock (must be first).
+// ---------------------------------------------------------------------------
+if (!app.requestSingleInstanceLock()) { app.quit(); }
+app.on('second-instance', () => { if (petWin) summon(); });
+
+// ---------------------------------------------------------------------------
+// Settings (persisted to userData).
+// ---------------------------------------------------------------------------
+const SETTINGS_FILE = () => path.join(app.getPath('userData'), 'rio-settings.json');
+const DEFAULTS = {
+  name: 'friend', scale: 1.5, mute: true, followCursor: true,
+  biteCursor: true, reactKeyboard: true, stretchEvery: 25,
+  agentEnabled: true, agentPort: 4279,
+};
+let settings = { ...DEFAULTS };
+function loadSettings() {
+  try { settings = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8')) }; }
+  catch { settings = { ...DEFAULTS }; }
+}
+function saveSettings() {
+  try { fs.writeFileSync(SETTINGS_FILE(), JSON.stringify(settings, null, 2)); } catch (e) { log('save fail', e); }
+}
+
+// ---------------------------------------------------------------------------
+// Geometry.
+// ---------------------------------------------------------------------------
+const BUF_W = 72, BUF_H = 60;       // Rio's internal pixel buffer (see rio.js)
+const TOP_PAD = 34;                 // headroom for jumps / Zzz / speech bubble
+function winSize() {
+  const s = settings.scale;
+  return { w: Math.round(BUF_W * s), h: Math.round(BUF_H * s) + TOP_PAD };
+}
+function roamRange() {
+  const ds = screen.getAllDisplays();
+  return {
+    min: Math.min(...ds.map(d => d.workArea.x)),
+    max: Math.max(...ds.map(d => d.workArea.x + d.workArea.width)),
+  };
+}
+// Snap a desired window-center onto a REAL display and floor-align it. We pick
+// the display nearest the dog's FEET point, which correctly handles every
+// monitor arrangement — side-by-side, vertically stacked, mixed sizes, mixed
+// scale factors, and gaps. The center X is then clamped inside that display's
+// work area, and the window Y is set so Rio's feet rest on that display's floor
+// (above its Dock/menu bar). As Rio walks past a shared edge his feet point
+// moves into the next monitor and he steps onto its floor — no getting stuck,
+// no sliding into dead space between monitors.
+function placeForCenter(centerX, feetY, w, h) {
+  w = w || brain.w; h = h || brain.h;
+  const disp = screen.getDisplayNearestPoint({ x: Math.round(centerX), y: Math.round(feetY || 0) });
+  const wa = disp.workArea;
+  const cx = Math.max(wa.x + w / 2, Math.min(wa.x + wa.width - w / 2, centerX));
+  return { x: cx - w / 2, y: wa.y + wa.height - h, disp, wa };
+}
+
+// ---------------------------------------------------------------------------
+// The brain.
+// ---------------------------------------------------------------------------
+let petWin = null;
+let brain = null;
+function newBrain() {
+  const { w, h } = winSize();
+  const sp = screen.getCursorScreenPoint();
+  const wa = screen.getDisplayNearestPoint(sp).workArea;
+  const startX = Math.max(wa.x, Math.min(wa.x + wa.width - w, sp.x - w / 2));
+  const y = wa.y + wa.height - h;
+  return {
+    w, h,
+    x: startX, y,
+    vy: 0, falling: false, fallShake: 0,
+    state: 'idle', stateTime: 0, hold: 0,    // hold = ms to stay before re-deciding
+    facing: 1,
+    targetX: null, speed: 0,
+    mood: 0.7, energy: 1,
+    nextDecision: 2200,
+    cursor: { x: sp.x, y: sp.y, vx: 0, vy: 0, speed: 0 },
+    hitbox: null,
+    dragging: false, dragOffset: { x: 0, y: 0 },
+    ignore: true,        // current click-through state
+    bubble: '', bubbleUntil: 0,
+    agent: null, agentUntil: 0,
+    zoomDir: 1, zoomLeft: 0,
+    lastBite: 0, keyUntil: 0, keyHot: false, scrollUntil: 0, lastScrollSpin: 0, spinFlip: 0,
+    lastSentState: '', lastBubbleSent: '',
+  };
+}
+
+// states that are "busy" — autonomous decisions & cursor-chase are suppressed
+const RESTING = new Set(['sit', 'nap', 'sleep', 'scratch', 'sniff', 'paw', 'rollover', 'think', 'pet',
+  'beg', 'stretch', 'playbow', 'dig', 'type', 'overheat', 'spin']);
+const ONESHOT = new Set(['bark', 'paw', 'rollover', 'land', 'bite', 'shake']);   // play once, then resolve
+
+function setState(s, hold) {
+  if (brain.state === s && !ONESHOT.has(s)) { if (hold) brain.hold = hold; return; }
+  brain.state = s;
+  brain.stateTime = 0;
+  brain.hold = hold || 0;
+  pushState();
+}
+function say(text, ms = 2600) { brain.bubble = text; brain.bubbleUntil = Date.now() + ms; pushState(); }
+
+function pushState() {
+  if (!petWin || petWin.isDestroyed()) return;
+  const showBubble = Date.now() < brain.bubbleUntil ? brain.bubble : '';
+  petWin.webContents.send('rio:state', {
+    state: brain.state, facing: brain.facing, mood: brain.mood, energy: brain.energy,
+    bubble: showBubble, name: settings.name, agent: brain.agent,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Window.
+// ---------------------------------------------------------------------------
+function createWindow() {
+  const { w, h } = winSize();
+  brain = newBrain();
+  petWin = new BrowserWindow({
+    width: w, height: h,
+    x: Math.round(brain.x), y: Math.round(brain.y),
+    transparent: true, frame: false, hasShadow: false, roundedCorners: false,
+    resizable: false, movable: true, skipTaskbar: true,
+    focusable: false, fullscreenable: false, minimizable: false, maximizable: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true, nodeIntegration: false, backgroundThrottling: false,
+    },
+  });
+  petWin.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  petWin.setAlwaysOnTop(true, 'screen-saver');
+  petWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
+  petWin.setIgnoreMouseEvents(true, { forward: true });
+  brain.ignore = true;
+  if (DEV) petWin.webContents.openDevTools({ mode: 'detach' });
+  petWin.on('closed', () => { petWin = null; });
+}
+
+function rebuildWindow() {
+  // size changes recreate the window (resizing a transparent macOS window is buggy)
+  const old = petWin;
+  const keepX = brain ? brain.x : undefined;
+  createWindow();
+  if (keepX != null) brain.x = keepX;
+  if (old && !old.isDestroyed()) old.destroy();
+}
+
+// ---------------------------------------------------------------------------
+// Cursor + main loop (~60fps).
+// ---------------------------------------------------------------------------
+let lastT = 0;
+function loop() {
+  const now = Date.now();
+  let dt = lastT ? now - lastT : 16;
+  lastT = now;
+  dt = Math.min(dt, 50);
+  if (!petWin || petWin.isDestroyed() || !brain) return;
+
+  // cursor + velocity
+  const p = screen.getCursorScreenPoint();
+  const c = brain.cursor;
+  const ndt = Math.max(1, dt) / 1000;
+  c.vx = (p.x - c.x) / ndt; c.vy = (p.y - c.y) / ndt;
+  c.speed = Math.hypot(c.vx, c.vy);
+  c.x = p.x; c.y = p.y;
+
+  think(dt);
+  applyMovement(dt);
+  updateClickThrough();
+  sendTick();
+
+  // auto-clear the speech bubble the instant it expires (otherwise the renderer
+  // would keep showing a stale bubble until the next state change)
+  const effBubble = now < brain.bubbleUntil ? brain.bubble : '';
+  if (effBubble !== brain.lastBubbleSent) { brain.lastBubbleSent = effBubble; pushState(); }
+
+  brain.stateTime += dt;
+}
+
+// behaviour state machine -----------------------------------------------------
+function think(dt) {
+  const b = brain;
+
+  // 1) Dragging always wins.
+  if (b.dragging) {
+    b.x = b.cursor.x - b.dragOffset.x;
+    b.y = b.cursor.y - b.dragOffset.y;
+    if (b.state !== 'drag') setState('drag');
+    return;
+  }
+
+  // 2) Falling after a drop.
+  if (b.falling) {
+    b.vy += 2600 * (dt / 1000);
+    b.y += b.vy * (dt / 1000);
+    const fp = placeForCenter(b.x + b.w / 2, b.y + b.h);
+    if (b.y >= fp.y) { b.y = fp.y; b.x = fp.x; b.falling = false; b.vy = 0; setState('land', 360); say(pick(['*tippy taps*', '^_^', 'whee!']), 1400); }
+    return;
+  }
+
+  // 3) Agent (Claude Code) override.
+  if (b.agent && now() < b.agentUntil) { agentThink(dt); return; }
+  if (b.agent && now() >= b.agentUntil) { b.agent = null; setState('idle'); }
+
+  // 4) One-shot actions resolve after their hold.
+  if (ONESHOT.has(b.state)) {
+    if (b.stateTime >= b.hold) setState(b.energy > 0.4 ? 'idle' : 'sit');
+    return;
+  }
+
+  // 4a) Spin (chasing his tail / reacting to a scroll) — flip facing then settle.
+  if (b.state === 'spin') {
+    if (b.stateTime >= 1100) { setState('idle', 600); }
+    else if (now() - b.spinFlip > 110) { b.facing *= -1; b.spinFlip = now(); pushState(); }
+    return;
+  }
+
+  // 4b) Jump-bite — the cursor got too close, so Rio leaps up and snaps at it.
+  if (settings.biteCursor && !RESTING.has(b.state) && b.state !== 'bite') {
+    const hx = headCenterX(), hy = b.y + b.h * 0.42;
+    const d = Math.hypot(b.cursor.x - hx, b.cursor.y - hy);
+    if (d < 48 && now() - b.lastBite > 850) {
+      b.lastBite = now();
+      b.facing = (b.cursor.x >= centerX()) ? 1 : -1;
+      setState('bite', 440);
+      if (Math.random() < 0.5) say(pick(['nom!', 'gotcha!', 'grr!', 'mine!']), 1100);
+      return;
+    }
+  }
+
+  // 4c) Typing reaction (needs the optional input hook) — tap along, overheat if fast.
+  if (now() < b.keyUntil && !RESTING.has(b.state)) { setState(b.keyHot ? 'overheat' : 'type'); return; }
+  if ((b.state === 'type' || b.state === 'overheat') && now() >= b.keyUntil) setState('idle');
+
+  // 4d) Scrolling makes him spin once (with a cooldown so it isn't spammy).
+  if (now() < b.scrollUntil && !RESTING.has(b.state) && now() - b.lastScrollSpin > 2600) {
+    b.lastScrollSpin = now(); b.spinFlip = now(); setState('spin'); return;
+  }
+
+  // 5) Cursor chase — fast movement near Rio makes him give chase.
+  if (settings.followCursor && !RESTING.has(b.state)) {
+    const dist = Math.abs(b.cursor.x - centerX());
+    if (b.cursor.speed > 900 && dist < 520 && dist > 60) {
+      b.targetX = b.cursor.x - b.w / 2;
+      setState('chase');
+      b.nextDecision = 700;
+      return;
+    }
+  }
+
+  // 6) Active locomotion.
+  if (b.state === 'chase') {
+    b.targetX = b.cursor.x - b.w / 2;
+    if (Math.abs(b.x - b.targetX) < 8 || b.cursor.speed < 250) {
+      // caught up / cursor settled
+      setState(Math.random() < 0.5 ? 'sit' : 'idle', 1500);
+      if (Math.random() < 0.4) { setState('bark', 360); }
+    }
+    return;
+  }
+  if (b.state === 'walk' || b.state === 'come') {
+    if (b.targetX == null || Math.abs(b.x - b.targetX) < 6) {
+      b.targetX = null;
+      setState(b.state === 'come' ? 'sit' : 'idle', b.state === 'come' ? 4000 : 1200);
+    }
+    return;
+  }
+  if (b.state === 'celebrate') { celebrate(dt); return; }
+
+  // 7) Autonomous life — pick a new little action now and then.
+  b.nextDecision -= dt;
+  if (b.hold > 0) { b.hold -= dt; if (b.hold > 0) return; }
+  if (b.nextDecision <= 0) decide();
+}
+
+function decide() {
+  const b = brain;
+  b.nextDecision = 2600 + Math.random() * 4200;
+  // gentle energy drift: resting restores, activity drains
+  const r = Math.random();
+  const tired = b.energy < 0.35;
+  if (tired) {
+    // wind down to a nap
+    b.energy = Math.min(1, b.energy + 0.05);
+    setState(Math.random() < 0.6 ? 'nap' : 'sleep', 6000 + Math.random() * 8000);
+    if (Math.random() < 0.5) say('zzz...', 3000);
+    return;
+  }
+  if (RESTING.has(b.state)) { b.energy = Math.min(1, b.energy + 0.08); }
+  if (r < 0.26) {                 // wander
+    const range = roamRange();
+    const span = 160 + Math.random() * 320;
+    let tx = b.x + (Math.random() < 0.5 ? -span : span);
+    tx = Math.max(range.min, Math.min(range.max - b.w, tx));
+    b.targetX = tx; setState('walk'); b.energy = Math.max(0, b.energy - 0.08);
+  } else if (r < 0.40) { setState('sit', 3000 + Math.random() * 4000); }
+  else if (r < 0.49) { setState('sniff', 2200); }
+  else if (r < 0.57) { setState('scratch', 1800); }
+  else if (r < 0.65) { setState('nap', 7000 + Math.random() * 8000); }
+  else if (r < 0.71) { setState('stretch', 3200); say(pick(['*big stretch*', 'mmmf~']), 2200); }
+  else if (r < 0.77) { setState('playbow', 2400); say(pick(["let's play!", 'play with me?']), 2200); }
+  else if (r < 0.82) { setState('beg', 2600); say(pick(['treat? 🦴', 'pretty please?']), 2400); }
+  else if (r < 0.87) { setState('dig', 2200); say(pick(['dig dig dig', '*scratch scratch*']), 1800); }
+  else if (r < 0.91) { setState('idle', 2400); b.facing = Math.random() < 0.5 ? 1 : -1; pushState(); }
+  else if (r < 0.96) { setState('rollover', 2600); say(pick(['rub my belly?', '<3']), 2400); }
+  else { setState('bark', 360); say('woof!', 1200); }
+}
+
+function celebrate(dt) {
+  const b = brain;
+  if (b.zoomLeft <= 0) { setState('sit', 1800); say(pick(['nice!!', 'we did it!', '*zoomies*']), 2200); return; }
+  b.zoomLeft -= dt;
+  // dash back and forth
+  if (b.targetX == null || Math.abs(b.x - b.targetX) < 12) {
+    const range = roamRange();
+    b.zoomDir *= -1;
+    let tx = b.x + b.zoomDir * (180 + Math.random() * 120);
+    tx = Math.max(range.min, Math.min(range.max - b.w, tx));
+    b.targetX = tx;
+  }
+}
+
+function agentThink(dt) {
+  const b = brain;
+  const a = b.agent;
+  if (a.kind === 'think') {
+    if (b.state !== 'think') setState('think');
+  } else if (a.kind === 'celebrate') {
+    if (b.state !== 'celebrate') { setState('celebrate'); b.zoomLeft = 1500; b.targetX = null; }
+    celebrate(dt);
+  } else if (a.kind === 'alert') {
+    if (b.state !== 'bark') setState('bark', 420);
+  } else if (a.kind === 'greet') {
+    if (b.state !== 'pet') setState('pet', 1800);
+  } else if (a.kind === 'whine') {
+    if (b.state !== 'sit') setState('sit', 2000);
+  }
+}
+
+// movement application --------------------------------------------------------
+function applyMovement(dt) {
+  const b = brain;
+  if (!b.dragging && !b.falling) {
+    // horizontal locomotion toward target
+    const moving = (b.state === 'walk' || b.state === 'come' || b.state === 'chase' || b.state === 'celebrate');
+    if (moving && b.targetX != null) {
+      const spd = (b.state === 'chase' || b.state === 'celebrate') ? 360 : 92; // px/s
+      const dir = Math.sign(b.targetX - b.x) || 1;
+      b.facing = dir >= 0 ? 1 : -1;
+      const step = spd * (dt / 1000);
+      if (Math.abs(b.targetX - b.x) <= step) b.x = b.targetX; else b.x += dir * step;
+    }
+    // place him on a real display and keep his feet on that display's floor
+    const p = placeForCenter(b.x + b.w / 2, b.y + b.h);
+    b.x = p.x; b.y = p.y;
+  }
+  petWin.setPosition(Math.round(b.x), Math.round(b.y));
+}
+
+// click-through toggle (using the global cursor vs the dog's hitbox) ----------
+function updateClickThrough() {
+  const b = brain;
+  let over = false;
+  if (b.hitbox) {
+    const lx = b.cursor.x - b.x, ly = b.cursor.y - b.y; // cursor in window CSS px
+    const hb = b.hitbox;
+    over = lx >= hb.x && lx <= hb.x + hb.w && ly >= hb.y && ly <= hb.y + hb.h;
+  }
+  const wantIgnore = !over && !b.dragging;
+  if (wantIgnore !== b.ignore) {
+    b.ignore = wantIgnore;
+    petWin.setIgnoreMouseEvents(wantIgnore, wantIgnore ? { forward: true } : undefined);
+  }
+}
+
+function sendTick() {
+  const b = brain;
+  petWin.webContents.send('rio:tick', {
+    cx: b.cursor.x - b.x, cy: b.cursor.y - b.y, speed: b.cursor.speed,
+    dragging: b.dragging,
+  });
+}
+
+// helpers
+function now() { return Date.now(); }
+function centerX() { return brain.x + brain.w / 2; }
+function headCenterX() { return brain.x + brain.w / 2 + brain.facing * (brain.w * 0.18); }
+function pick(arr) { return arr[(Math.random() * arr.length) | 0]; }
+
+// ---------------------------------------------------------------------------
+// Drag (custom, via global cursor — robust through click-through).
+// ---------------------------------------------------------------------------
+ipcMain.on('rio:drag-start', () => {
+  if (!brain) return;
+  const c = screen.getCursorScreenPoint();
+  brain.dragging = true;
+  brain.dragOffset = { x: c.x - brain.x, y: c.y - brain.y };
+  brain.agent = null;
+  petWin.setIgnoreMouseEvents(false);
+  brain.ignore = false;
+  setState('drag');
+});
+ipcMain.on('rio:drag-end', () => {
+  if (!brain || !brain.dragging) return;
+  brain.dragging = false;
+  brain.falling = true; brain.vy = 0;
+  brain.mood = Math.min(1, brain.mood + 0.05);
+});
+
+// ---------------------------------------------------------------------------
+// Renderer intents.
+// ---------------------------------------------------------------------------
+ipcMain.on('rio:ready', () => { pushConfig(); pushState(); });
+ipcMain.on('rio:hitbox', (_e, rect) => { if (brain) brain.hitbox = rect; });
+ipcMain.on('rio:action', (_e, { name, data }) => handleAction(name, data));
+ipcMain.handle('rio:get-config', () => configPayload());
+
+function configPayload() {
+  const { w, h } = winSize();
+  return { name: settings.name, scale: settings.scale, mute: settings.mute, w, h };
+}
+function pushConfig() { if (petWin && !petWin.isDestroyed()) petWin.webContents.send('rio:config', configPayload()); }
+
+function handleAction(name, data) {
+  const b = brain; if (!b) return;
+  switch (name) {
+    case 'pet':                                   // renderer detected head-petting
+      b.mood = Math.min(1, b.mood + 0.04);
+      if (!RESTING.has(b.state) || b.state === 'sit' || b.state === 'idle') setState('pet', 1400);
+      if (Math.random() < 0.012) say(pick(['<3', '*happy*', 'arf!']), 1500);
+      break;
+    case 'bark': setState('bark', 360); say('woof!', 1100); break;
+    case 'paw': setState('paw', 1600); say(pick(['paw!', '*shake*']), 1800); break;
+    case 'doubleclick': setState('bark', 380); say(pick(['woof woof!', 'borf!']), 1200); break;
+    case 'poke': if (!b.dragging) { setState('idle', 800); b.facing = (data && data.fromLeft) ? 1 : -1; pushState(); } break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tray menu commands.
+// ---------------------------------------------------------------------------
+function cmdCome() {
+  const c = screen.getCursorScreenPoint();
+  brain.targetX = c.x - brain.w / 2; brain.agent = null; setState('come');
+}
+function rebuildTray() {
+  if (!tray) return;
+  const m = Menu.buildFromTemplate([
+    { label: `🐾 Rio`, enabled: false },
+    { type: 'separator' },
+    { label: 'Come here', click: cmdCome },
+    { label: 'Tricks', submenu: [
+      { label: 'Sit', click: () => { brain.agent = null; setState('sit', 6000); } },
+      { label: 'Lie down / nap', click: () => { brain.agent = null; setState('nap', 12000); say('zzz...', 3000); } },
+      { label: 'Give paw', click: () => { brain.agent = null; setState('paw', 1800); say('paw!', 1800); } },
+      { label: 'Beg', click: () => { brain.agent = null; setState('beg', 3000); say(pick(['treat? 🦴', 'pretty please?']), 2400); } },
+      { label: 'Roll over', click: () => { brain.agent = null; setState('rollover', 2800); say('<3', 2400); } },
+      { label: 'Play bow', click: () => { brain.agent = null; setState('playbow', 2600); say("let's play!", 2200); } },
+      { label: 'Spin', click: () => { brain.agent = null; brain.spinFlip = now(); setState('spin'); } },
+      { label: 'Shake off', click: () => { brain.agent = null; setState('shake', 720); } },
+      { label: 'Dig', click: () => { brain.agent = null; setState('dig', 2400); say('dig dig dig', 1800); } },
+      { label: 'Stretch', click: () => { brain.agent = null; setState('stretch', 3200); say('*big stretch*', 2200); } },
+      { label: 'Speak!', click: () => { brain.agent = null; setState('bark', 360); say('woof!', 1200); } },
+      { label: 'Zoomies!', click: () => { brain.agent = null; setState('celebrate'); brain.zoomLeft = 2200; brain.targetX = null; } },
+    ] },
+    { type: 'separator' },
+    { label: 'Follow the cursor', type: 'checkbox', checked: settings.followCursor,
+      click: (mi) => { settings.followCursor = mi.checked; saveSettings(); } },
+    { label: 'Bite at the cursor', type: 'checkbox', checked: settings.biteCursor,
+      click: (mi) => { settings.biteCursor = mi.checked; saveSettings(); } },
+    { label: 'React to typing', type: 'checkbox', checked: settings.reactKeyboard,
+      click: (mi) => { settings.reactKeyboard = mi.checked; saveSettings(); restartInputHooks(); } },
+    { label: 'Sounds', type: 'checkbox', checked: !settings.mute,
+      click: (mi) => { settings.mute = !mi.checked; saveSettings(); pushConfig(); } },
+    { label: 'React to Claude Code', type: 'checkbox', checked: settings.agentEnabled,
+      click: (mi) => { settings.agentEnabled = mi.checked; saveSettings(); restartAgentServer(); } },
+    { label: 'Size', submenu: [
+      { label: 'Tiny', type: 'radio', checked: settings.scale === 1, click: () => setScale(1) },
+      { label: 'Small', type: 'radio', checked: settings.scale === 1.5, click: () => setScale(1.5) },
+      { label: 'Medium', type: 'radio', checked: settings.scale === 2, click: () => setScale(2) },
+      { label: 'Large', type: 'radio', checked: settings.scale === 3, click: () => setScale(3) },
+    ] },
+    { type: 'separator' },
+    { label: 'Settings…', click: openSettings },
+    { label: 'Hide Rio', click: () => { if (petWin) petWin.isVisible() ? petWin.hide() : summon(); } },
+    { type: 'separator' },
+    { label: 'Quit Rio', click: () => { app.isQuitting = true; app.quit(); } },
+  ]);
+  tray.setContextMenu(m);
+}
+function setScale(s) { settings.scale = s; saveSettings(); rebuildWindow(); rebuildTray(); pushConfig(); }
+
+function summon() {
+  if (!petWin || petWin.isDestroyed()) { createWindow(); return; }
+  const c = screen.getCursorScreenPoint();
+  const p = placeForCenter(c.x, c.y);
+  brain.x = p.x; brain.y = p.y;
+  brain.dragging = false; brain.falling = false;
+  petWin.show();
+  setState('pet', 1400); say(pick([`hi ${settings.name}!`, 'hello!', '*wag wag*']), 2200);
+}
+
+// ---------------------------------------------------------------------------
+// Settings window.
+// ---------------------------------------------------------------------------
+let settingsWin = null;
+function openSettings() {
+  if (settingsWin && !settingsWin.isDestroyed()) { settingsWin.focus(); return; }
+  settingsWin = new BrowserWindow({
+    width: 460, height: 600, title: 'Rio', resizable: false, fullscreenable: false,
+    webPreferences: { preload: path.join(__dirname, 'preload-settings.js'), contextIsolation: true },
+  });
+  settingsWin.loadFile(path.join(__dirname, '..', 'renderer', 'settings.html'));
+  settingsWin.on('closed', () => { settingsWin = null; });
+}
+ipcMain.handle('rio:settings-get', () => ({ ...settings, port: settings.agentPort, appDir: path.join(__dirname, '..', '..') }));
+ipcMain.handle('rio:settings-set', (_e, patch) => {
+  const sizeChanged = patch.scale != null && patch.scale !== settings.scale;
+  settings = { ...settings, ...patch };
+  saveSettings();
+  if (sizeChanged) rebuildWindow();
+  rebuildTray(); pushConfig(); pushState(); restartAgentServer(); restartInputHooks();
+  return { ok: true };
+});
+ipcMain.on('rio:open-external', (_e, url) => shell.openExternal(url));
+
+// ---------------------------------------------------------------------------
+// Claude Code / AI agent integration — a tiny local HTTP server.
+//   POST http://127.0.0.1:<port>/agent-state  {state, message, tool}
+// ---------------------------------------------------------------------------
+let agentServer = null;
+function startAgentServer() {
+  if (!settings.agentEnabled) return;
+  agentServer = http.createServer((req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+    if (req.method === 'GET') { res.writeHead(200); res.end('Rio is listening 🐾'); return; }
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 1e5) req.destroy(); });
+    req.on('end', () => {
+      let data = {};
+      try { data = JSON.parse(body || '{}'); } catch {}
+      onAgentEvent(data);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+  });
+  agentServer.on('error', (e) => log('agent server error', e.code));
+  agentServer.listen(settings.agentPort, '127.0.0.1', () => log('agent server on', settings.agentPort));
+}
+function restartAgentServer() {
+  if (agentServer) { try { agentServer.close(); } catch {} agentServer = null; }
+  startAgentServer();
+}
+function onAgentEvent(data) {
+  if (!brain || !settings.agentEnabled) return;
+  const s = String(data.state || data.event || '').toLowerCase();
+  const msg = data.message || data.tool || '';
+  let kind = null, ttl = 8000, bubble = null;
+  if (/(think|busy|work|run|tool|progress|start_tool|pretool)/.test(s)) { kind = 'think'; ttl = 90000; bubble = msg || 'thinking…'; }
+  else if (/(done|stop|complete|finish|success|idle)/.test(s)) { kind = 'celebrate'; ttl = 4000; bubble = pick(['all done!', 'finished!', 'we did it!']); }
+  else if (/(notif|wait|input|attention|permission|ask)/.test(s)) { kind = 'alert'; ttl = 6000; bubble = msg || 'your turn!'; }
+  else if (/(error|fail|deny)/.test(s)) { kind = 'whine'; ttl = 5000; bubble = msg || 'uh oh…'; }
+  else if (/(session|greet|hello|start$)/.test(s)) { kind = 'greet'; ttl = 4000; bubble = `hi ${settings.name}!`; }
+  else { kind = 'think'; ttl = 8000; bubble = msg; }
+  brain.agent = { kind };
+  brain.agentUntil = now() + ttl;
+  if (bubble) say(bubble, Math.min(ttl, 4000));
+}
+
+// ---------------------------------------------------------------------------
+// Optional global input hooks (keyboard + scroll) via uiohook-napi.
+// Needs macOS Accessibility permission; degrades gracefully if unavailable —
+// Rio simply won't react to typing/scrolling if the module or permission is
+// missing. Everything else keeps working.
+// ---------------------------------------------------------------------------
+let uio = null, uioOn = false, keyTimes = [];
+function startInputHooks() {
+  if (!settings.reactKeyboard || uioOn) return;
+  try { uio = uio || require('uiohook-napi'); } catch { uio = null; return; }
+  try {
+    const u = uio.uIOhook;
+    u.removeAllListeners && u.removeAllListeners();
+    u.on('keydown', () => {
+      if (!brain) return;
+      const t = now(); keyTimes.push(t); keyTimes = keyTimes.filter(x => t - x < 1400);
+      brain.keyUntil = t + 650;
+      brain.keyHot = keyTimes.length >= 8;   // typing fast -> overheat
+    });
+    u.on('wheel', () => { if (brain && !brain.dragging) brain.scrollUntil = now() + 450; });
+    u.start();
+    uioOn = true; log('input hooks on');
+  } catch (e) { uioOn = false; log('input hooks failed', e && e.message); }
+}
+function stopInputHooks() {
+  try { if (uio && uioOn) { uio.uIOhook.removeAllListeners && uio.uIOhook.removeAllListeners(); uio.uIOhook.stop(); } } catch {}
+  uioOn = false;
+}
+function restartInputHooks() { stopInputHooks(); startInputHooks(); }
+
+// ---------------------------------------------------------------------------
+// Tray + app lifecycle.
+// ---------------------------------------------------------------------------
+let tray = null;
+function makeTray() {
+  let img;
+  const p = path.join(__dirname, '..', '..', 'assets', 'trayTemplate.png');
+  try { img = nativeImage.createFromPath(p); } catch {}
+  if (!img || img.isEmpty()) img = nativeImage.createEmpty();
+  img.setTemplateImage(true);
+  tray = new Tray(img);
+  tray.setToolTip('Rio — your desktop dog');
+  rebuildTray();
+}
+
+app.whenReady().then(() => {
+  loadSettings();
+  app.setActivationPolicy?.('accessory');
+  app.dock?.hide();
+  createWindow();
+  makeTray();
+  startAgentServer();
+  startInputHooks();
+  setInterval(loop, 1000 / 60);
+
+  // periodic stretch-break nudge — a literal downward dog to remind you too
+  let lastStretch = Date.now();
+  setInterval(() => {
+    if (!brain || brain.dragging || brain.agent || petWin == null) return;
+    if (settings.stretchEvery > 0 && Date.now() - lastStretch > settings.stretchEvery * 60000) {
+      lastStretch = Date.now();
+      setState('stretch', 4500);
+      say(pick([`stretch time, ${settings.name}!`, "let's stretch together", 'take a break? 🐾']), 4000);
+    }
+  }, 30000);
+  try {
+    globalShortcut.register('CommandOrControl+Shift+D', () => { if (petWin && petWin.isVisible()) petWin.hide(); else summon(); });
+  } catch {}
+  // re-assert always-on-top occasionally (macOS can drop the level)
+  setInterval(() => { if (petWin && !petWin.isDestroyed()) petWin.setAlwaysOnTop(true, 'screen-saver'); }, 4000);
+  // recompute floor when displays change
+  screen.on('display-metrics-changed', () => {}); screen.on('display-added', () => {}); screen.on('display-removed', () => {});
+
+  // dev-only: capture frames to verify rendering, then quit.
+  if (process.env.RIO_SHOTS) {
+    const dir = process.env.RIO_SHOTS; let n = 0;
+    const cap = (tag) => {
+      if (!petWin || petWin.isDestroyed()) return;
+      petWin.webContents.capturePage().then((img) => {
+        fs.writeFileSync(path.join(dir, `app_${String(++n).padStart(2, '0')}_${tag}.png`), img.toPNG());
+      }).catch(() => {});
+    };
+    setTimeout(() => cap('launch'), 1500);
+    setTimeout(() => { brain.agent = null; setState('nap', 12000); say('zzz...', 1500); }, 2000);
+    setTimeout(() => cap('bubble_on'), 2700);   // bubble visible
+    setTimeout(() => cap('bubble_off'), 4400);  // say expired ~3.5s -> bubble must be gone
+    setTimeout(() => { app.isQuitting = true; app.quit(); }, 5000);
+  }
+});
+
+app.on('window-all-closed', () => { /* tray app — keep running */ });
+app.on('will-quit', () => { globalShortcut.unregisterAll(); stopInputHooks(); if (agentServer) try { agentServer.close(); } catch {} });

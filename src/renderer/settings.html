@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Rio</title>
+<style>
+  :root { --ink:#2a2230; --tan:#a86c2e; --red:#d6473b; --paper:#fffdf7; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 ui-rounded, "Segoe UI", system-ui, sans-serif;
+    color: var(--ink); background: #f4ede0; }
+  header { background: var(--ink); color: var(--paper); padding: 16px 18px; }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 4px 0 0; font-size: 12px; opacity: .8; }
+  main { padding: 16px 18px 22px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 9px 0; border-bottom: 1px solid #e2d7c4; }
+  .row:last-child { border-bottom: none; }
+  label { font-weight: 600; }
+  .hint { font-size: 11px; color: #7a6f60; font-weight: 400; }
+  input[type=text], input[type=number], select { font: inherit; padding: 5px 8px;
+    border: 2px solid var(--ink); border-radius: 7px; background: #fff; }
+  input[type=text] { width: 150px; } input[type=number] { width: 74px; }
+  input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--red); }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: #8a7d6b; margin: 20px 0 6px; }
+  .card { background: var(--paper); border: 2px solid var(--ink); border-radius: 10px; padding: 12px; }
+  pre { background: #2a2230; color: #ffe; padding: 10px; border-radius: 7px; overflow:auto;
+    font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; }
+  button { font: inherit; font-weight: 700; cursor: pointer; border: 2px solid var(--ink);
+    background: var(--red); color: #fff; padding: 6px 12px; border-radius: 8px; }
+  button.ghost { background: #fff; color: var(--ink); }
+  a { color: var(--red); }
+  .tip { font-size:12px; color:#6b5; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>🐾 Rio</h1>
+    <p>your pixel desktop dog</p>
+  </header>
+  <main>
+    <div class="row">
+      <div><label>Your name</label><div class="hint">Rio calls you this</div></div>
+      <input id="name" type="text" />
+    </div>
+    <div class="row">
+      <div><label>Size</label></div>
+      <select id="scale">
+        <option value="1">Tiny</option>
+        <option value="1.5">Small</option>
+        <option value="2">Medium</option>
+        <option value="3">Large</option>
+      </select>
+    </div>
+    <div class="row">
+      <div><label>Follow the cursor</label><div class="hint">chase fast mouse moves</div></div>
+      <input id="followCursor" type="checkbox" />
+    </div>
+    <div class="row">
+      <div><label>Jump &amp; bite the cursor</label><div class="hint">snaps at it when it gets close</div></div>
+      <input id="biteCursor" type="checkbox" />
+    </div>
+    <div class="row">
+      <div><label>React to typing</label><div class="hint">taps along · overheats if fast (needs Accessibility)</div></div>
+      <input id="reactKeyboard" type="checkbox" />
+    </div>
+    <div class="row">
+      <div><label>Sounds</label><div class="hint">little barks &amp; yips (off by default)</div></div>
+      <input id="sound" type="checkbox" />
+    </div>
+
+    <h2>Claude Code integration</h2>
+    <div class="card">
+      <div class="row" style="border:none;padding-top:0">
+        <div><label>React to Claude Code</label><div class="hint">think along, celebrate when done</div></div>
+        <input id="agentEnabled" type="checkbox" />
+      </div>
+      <div class="row" style="border:none">
+        <div><label>Local port</label></div>
+        <input id="agentPort" type="number" min="1024" max="65535" />
+      </div>
+      <p style="font-size:12px;margin:6px 0">Run this once to teach Claude Code to wag Rio's tail:</p>
+      <pre id="hookCmd"></pre>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button id="copyHook">Copy command</button>
+        <button class="ghost" id="docs">How it works</button>
+      </div>
+      <p id="copied" class="tip" style="visibility:hidden">copied! ✓</p>
+    </div>
+  </main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let cur = {};
+  async function load() {
+    cur = await window.rioSettings.get();
+    $('name').value = cur.name || '';
+    $('scale').value = String(cur.scale || 3);
+    $('followCursor').checked = !!cur.followCursor;
+    $('biteCursor').checked = !!cur.biteCursor;
+    $('reactKeyboard').checked = !!cur.reactKeyboard;
+    $('sound').checked = !cur.mute;
+    $('agentEnabled').checked = !!cur.agentEnabled;
+    $('agentPort').value = cur.agentPort || 4279;
+    renderHook();
+  }
+  function renderHook() {
+    const port = $('agentPort').value || 4279;
+    $('hookCmd').textContent = 'node "' + cur.appDir + '/tools/install-claude-hook.js" --port ' + port;
+  }
+  async function save(patch) { await window.rioSettings.set(patch); }
+  $('name').addEventListener('change', e => save({ name: e.target.value.trim() || 'friend' }));
+  $('scale').addEventListener('change', e => save({ scale: parseFloat(e.target.value) }));
+  $('followCursor').addEventListener('change', e => save({ followCursor: e.target.checked }));
+  $('biteCursor').addEventListener('change', e => save({ biteCursor: e.target.checked }));
+  $('reactKeyboard').addEventListener('change', e => save({ reactKeyboard: e.target.checked }));
+  $('sound').addEventListener('change', e => save({ mute: !e.target.checked }));
+  $('agentEnabled').addEventListener('change', e => save({ agentEnabled: e.target.checked }));
+  $('agentPort').addEventListener('change', e => { save({ agentPort: parseInt(e.target.value, 10) || 4279 }); renderHook(); });
+  $('copyHook').addEventListener('click', () => {
+    navigator.clipboard.writeText($('hookCmd').textContent);
+    const c = $('copied'); c.style.visibility = 'visible'; setTimeout(() => c.style.visibility = 'hidden', 1500);
+  });
+  $('docs').addEventListener('click', () => window.rioSettings.openExternal('https://docs.claude.com/en/docs/claude-code/hooks'));
+  load();
+</script>
+</body>
+</html>

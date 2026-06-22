@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+.playwright-mcp/
+shots/app/
+
+# personal source photos of the real Rio (kept out of the public repo)
+*.HEIC
