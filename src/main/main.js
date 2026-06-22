@@ -41,12 +41,16 @@ function saveSettings() {
 // ---------------------------------------------------------------------------
 // Geometry.
 // ---------------------------------------------------------------------------
-const BUF_W = 72, BUF_H = 60;       // Rio's internal pixel buffer (see rio.js)
-const TOP_PAD = 34;                 // headroom for jumps / Zzz / speech bubble
+const BUF_W = 72, BUF_H = 60, BASE_ROW = 50;   // Rio's internal pixel buffer (see rio.js)
+// margins around the buffer give room for the speech bubble, the throw tumble
+// (the sprite rotates), dangling feet, and the landing dust — without clipping.
+const MARGIN_X = 20, MARGIN_TOP = 24, MARGIN_BOT = 14;
 function winSize() {
   const s = settings.scale;
-  return { w: Math.round(BUF_W * s), h: Math.round(BUF_H * s) + TOP_PAD };
+  return { w: Math.round((BUF_W + 2 * MARGIN_X) * s), h: Math.round((BUF_H + MARGIN_TOP + MARGIN_BOT) * s) };
 }
+// the window hangs below the floor by this much so Rio's feet rest exactly on it
+function feetOverhang() { return Math.round((BUF_H - BASE_ROW + MARGIN_BOT) * settings.scale); }
 function roamRange() {
   const ds = screen.getAllDisplays();
   return {
@@ -67,7 +71,7 @@ function placeForCenter(centerX, feetY, w, h) {
   const disp = screen.getDisplayNearestPoint({ x: Math.round(centerX), y: Math.round(feetY || 0) });
   const wa = disp.workArea;
   const cx = Math.max(wa.x + w / 2, Math.min(wa.x + wa.width - w / 2, centerX));
-  return { x: cx - w / 2, y: wa.y + wa.height - h, disp, wa };
+  return { x: cx - w / 2, y: wa.y + wa.height - h + feetOverhang(), disp, wa };
 }
 
 // ---------------------------------------------------------------------------
@@ -80,11 +84,13 @@ function newBrain() {
   const sp = screen.getCursorScreenPoint();
   const wa = screen.getDisplayNearestPoint(sp).workArea;
   const startX = Math.max(wa.x, Math.min(wa.x + wa.width - w, sp.x - w / 2));
-  const y = wa.y + wa.height - h;
+  const y = wa.y + wa.height - h + feetOverhang();
   return {
     w, h,
     x: startX, y,
-    vy: 0, falling: false, fallShake: 0,
+    vy: 0, vx: 0, falling: false, bounces: 0,
+    angle: 0, angVel: 0,            // tumble while airborne
+    svx: 0, svy: 0,                 // smoothed cursor velocity (for throw release)
     state: 'idle', stateTime: 0, hold: 0,    // hold = ms to stay before re-deciding
     facing: 1,
     targetX: null, speed: 0,
@@ -98,6 +104,7 @@ function newBrain() {
     agent: null, agentUntil: 0,
     zoomDir: 1, zoomLeft: 0,
     lastBite: 0, keyUntil: 0, keyHot: false, scrollUntil: 0, lastScrollSpin: 0, spinFlip: 0,
+    settledUntil: 0,                // stays put after being placed (move out of the way)
     lastSentState: '', lastBubbleSent: '',
   };
 }
@@ -178,6 +185,9 @@ function loop() {
   c.vx = (p.x - c.x) / ndt; c.vy = (p.y - c.y) / ndt;
   c.speed = Math.hypot(c.vx, c.vy);
   c.x = p.x; c.y = p.y;
+  // smoothed cursor velocity — the basis for "throw" strength on release
+  brain.svx = brain.svx * 0.6 + c.vx * 0.4;
+  brain.svy = brain.svy * 0.6 + c.vy * 0.4;
 
   think(dt);
   applyMovement(dt);
@@ -204,12 +214,31 @@ function think(dt) {
     return;
   }
 
-  // 2) Falling after a drop.
+  // 2) Falling / being thrown — projectile physics, tumble, and bounces.
   if (b.falling) {
-    b.vy += 2600 * (dt / 1000);
-    b.y += b.vy * (dt / 1000);
+    const dts = dt / 1000;
+    b.vy += 3000 * dts;                 // gravity
+    b.vx *= (1 - 1.1 * dts);            // air drag on horizontal throw
+    b.x += b.vx * dts;
+    b.y += b.vy * dts;
+    b.angle += b.angVel * dts;          // tumble
+    b.angVel *= (1 - 0.8 * dts);
+    // bounce off the left/right edges of the whole desktop
+    const range = roamRange();
+    if (b.x < range.min) { b.x = range.min; b.vx = Math.abs(b.vx) * 0.5; b.angVel = -b.angVel * 0.6; if (b.stateTime > 120) say('bonk!', 700); }
+    else if (b.x > range.max - b.w) { b.x = range.max - b.w; b.vx = -Math.abs(b.vx) * 0.5; b.angVel = -b.angVel * 0.6; if (b.stateTime > 120) say('bonk!', 700); }
+    // floor of the display under him
     const fp = placeForCenter(b.x + b.w / 2, b.y + b.h);
-    if (b.y >= fp.y) { b.y = fp.y; b.x = fp.x; b.falling = false; b.vy = 0; setState('land', 360); say(pick(['*tippy taps*', '^_^', 'whee!']), 1400); }
+    if (b.y >= fp.y) {
+      if (b.vy > 820 && b.bounces < 1) {   // one cartoony bounce on a hard landing
+        b.y = fp.y; b.vy = -b.vy * 0.34; b.vx *= 0.5; b.angVel *= 0.3; b.bounces++;
+      } else {                              // settle
+        b.y = fp.y; b.x = fp.x; b.vx = 0; b.vy = 0; b.angVel = 0; b.angle = 0; b.bounces = 0; b.falling = false;
+        setState('land', 420);
+        b.settledUntil = now() + 22000;     // stay here a while (out of the way)
+        say(pick(['oof!', '*tippy taps*', "i'll stay here", 'whee!', 'comfy spot']), 1600);
+      }
+    }
     return;
   }
 
@@ -220,6 +249,14 @@ function think(dt) {
   // 4) One-shot actions resolve after their hold.
   if (ONESHOT.has(b.state)) {
     if (b.stateTime >= b.hold) setState(b.energy > 0.4 ? 'idle' : 'sit');
+    return;
+  }
+
+  // 4.0) Stay put after being placed — dropping him is how you move him out of
+  // the way, so he sits where he landed and won't wander/chase/bite until the
+  // timer runs out or you interact with him (pet/poke/grab clears it).
+  if (now() < b.settledUntil) {
+    if (b.state !== 'sit') setState('sit', Math.max(1500, b.settledUntil - now()));
     return;
   }
 
@@ -392,7 +429,8 @@ function sendTick() {
   const b = brain;
   petWin.webContents.send('rio:tick', {
     cx: b.cursor.x - b.x, cy: b.cursor.y - b.y, speed: b.cursor.speed,
-    dragging: b.dragging,
+    dragging: b.dragging, airborne: b.falling, angle: b.angle,
+    vmag: Math.hypot(b.vx, b.vy),
   });
 }
 
@@ -411,6 +449,7 @@ ipcMain.on('rio:drag-start', () => {
   brain.dragging = true;
   brain.dragOffset = { x: c.x - brain.x, y: c.y - brain.y };
   brain.agent = null;
+  brain.settledUntil = 0;
   petWin.setIgnoreMouseEvents(false);
   brain.ignore = false;
   setState('drag');
@@ -418,8 +457,16 @@ ipcMain.on('rio:drag-start', () => {
 ipcMain.on('rio:drag-end', () => {
   if (!brain || !brain.dragging) return;
   brain.dragging = false;
-  brain.falling = true; brain.vy = 0;
+  // fling him with the cursor's release velocity — a flick throws him across the
+  // screen; a gentle let-go just drops him. He always falls to the floor.
+  brain.vx = Math.max(-2400, Math.min(2400, brain.svx * 0.9));
+  brain.vy = Math.max(-1400, Math.min(1700, brain.svy * 0.9));
+  brain.angVel = Math.max(-14, Math.min(14, brain.vx / 130)); // tumble with the throw
+  brain.bounces = 0;
+  brain.falling = true;
   brain.mood = Math.min(1, brain.mood + 0.05);
+  setState('fall');
+  if (Math.hypot(brain.vx, brain.vy) > 1400) say(pick(['wheeee!', 'aaah!', 'yeet!']), 1200);
 });
 
 // ---------------------------------------------------------------------------
@@ -438,6 +485,7 @@ function pushConfig() { if (petWin && !petWin.isDestroyed()) petWin.webContents.
 
 function handleAction(name, data) {
   const b = brain; if (!b) return;
+  b.settledUntil = 0;          // any direct interaction ends the "stay" early
   switch (name) {
     case 'pet':                                   // renderer detected head-petting
       b.mood = Math.min(1, b.mood + 0.04);
@@ -702,11 +750,13 @@ app.whenReady().then(() => {
         fs.writeFileSync(path.join(dir, `app_${String(++n).padStart(2, '0')}_${tag}.png`), img.toPNG());
       }).catch(() => {});
     };
-    setTimeout(() => cap('launch'), 1500);
-    setTimeout(() => { brain.agent = null; setState('nap', 12000); say('zzz...', 1500); }, 2000);
-    setTimeout(() => cap('bubble_on'), 2700);   // bubble visible
-    setTimeout(() => cap('bubble_off'), 4400);  // say expired ~3.5s -> bubble must be gone
-    setTimeout(() => { app.isQuitting = true; app.quit(); }, 5000);
+    setTimeout(() => cap('launch'), 1400);
+    setTimeout(() => { brain.dragging = false; brain.falling = true; brain.vx = 1300; brain.vy = -980; brain.angVel = 9; brain.bounces = 0; setState('fall'); }, 1800);
+    setTimeout(() => cap('air1'), 2000);
+    setTimeout(() => cap('air2'), 2230);
+    setTimeout(() => cap('air3'), 2470);
+    setTimeout(() => cap('land'), 2780);
+    setTimeout(() => { app.isQuitting = true; app.quit(); }, 3400);
   }
 });
 

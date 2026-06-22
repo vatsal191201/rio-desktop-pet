@@ -7,7 +7,8 @@
 (function () {
   'use strict';
 
-  const BUF_W = 72, BUF_H = 60, BX = 37, BASE = 50, GROUND_PAD = 6;
+  const BUF_W = 72, BUF_H = 60, BX = 37, BASE = 50;
+  const MARGIN_X = 20, MARGIN_TOP = 24;   // must match main.js (room for bubble/tumble/dust)
 
   const canvas = document.getElementById('rio');
   const ctx = canvas.getContext('2d');
@@ -23,14 +24,14 @@
   function fit() {
     dpr = Math.max(1, Math.round(window.devicePixelRatio || 1));
     Wc = window.innerWidth; Hc = window.innerHeight;
-    SCALE = Wc / BUF_W;            // may be fractional (e.g. 1.5); stays crisp on Retina
+    SCALE = Wc / (BUF_W + 2 * MARGIN_X);   // may be fractional (e.g. 1.5); crisp on Retina
     drawScale = SCALE * dpr;
     canvas.width = Math.round(Wc * dpr);
     canvas.height = Math.round(Hc * dpr);
     canvas.style.width = Wc + 'px';
     canvas.style.height = Hc + 'px';
     offX = Math.round(canvas.width / 2 - BX * drawScale);
-    offY = Math.round((Hc - GROUND_PAD) * dpr - BASE * drawScale);
+    offY = Math.round(MARGIN_TOP * drawScale);
     ctx.imageSmoothingEnabled = false;
     reportHitbox();
   }
@@ -39,9 +40,9 @@
   // so it can decide when to disable click-through.
   function reportHitbox() {
     const cssOffX = Wc / 2 - BX * SCALE;
-    const cssOffY = (Hc - GROUND_PAD) - BASE * SCALE;
+    const cssOffY = MARGIN_TOP * SCALE;
     const x = cssOffX + 11 * SCALE, w = 44 * SCALE;
-    const y = cssOffY + 6 * SCALE, h = 48 * SCALE;
+    const y = cssOffY + 8 * SCALE, h = 46 * SCALE;
     window.rio.reportHitbox({ x, y, w, h });
   }
 
@@ -86,6 +87,7 @@
       case 'shake': T.ear = 0.8; T.mouth = 0.2; break;
       case 'think': T.sit = 1; T.think = 1; T.ear = -0.35; T.headUp = 0.4; break;
       case 'drag': T.dangle = 1; T.ear = 1; T.tongue = 0.7; T.mouth = 0.25; break;
+      case 'fall': T.ear = 0; T.mouth = 0.7; T.tongue = 0.6; T.dangle = 0; break;
       case 'land': T.ear = 0.5; T.mouth = 0.2; break;
       case 'idle': default: T.ear = 0.35; break;
     }
@@ -94,12 +96,12 @@
 
   // ---- timers & procedural motion -----------------------------------------
   let t = 0, blinkTimer = 1500 + Math.random() * 2500, blinking = 0;
-  let legPhase = 0, lastState = '', stateEnter = 0, landSpring = 0, pawWave = 0;
+  let legPhase = 0, lastState = '', stateEnter = 0, landSpring = 0, pawWave = 0, lastDt = 16;
 
   function frame(ts) {
     const now = ts || 0;
     const dt = Math.min(50, frame._last ? now - frame._last : 16);
-    frame._last = now; t += dt;
+    frame._last = now; t += dt; lastDt = dt;
 
     if (S.state !== lastState) { onEnterState(S.state); lastState = S.state; stateEnter = t; }
 
@@ -128,7 +130,7 @@
 
   function onEnterState(st) {
     if (st === 'bark') { sound('bark'); }
-    if (st === 'land') { landSpring = 360; }
+    if (st === 'land') { landSpring = 420; }
     if (st === 'pet' && Math.random() < 0.4) sound('yip');
     if (st === 'celebrate') sound('bark');
     if (st === 'bite') sound('yip');
@@ -162,7 +164,7 @@
     const moving = (S.state === 'walk' || S.state === 'come' || S.state === 'chase' || S.state === 'celebrate');
     if (moving) {
       const runF = A.run;
-      legPhase += (dtSpeed() * (runF > 0.5 ? 0.0019 : 0.0013));
+      legPhase += lastDt / (runF > 0.5 ? 330 : 520);   // ms per gait cycle (frame-rate independent)
       pose.legPhase = (legPhase % 1 + 1) % 1;
       pose.step = 1 + runF * 0.35;
       pose.bob = -Math.abs(Math.sin(pose.legPhase * Math.PI * 2)) * (1 + runF);
@@ -189,10 +191,10 @@
       pose.mouth = age < 60 ? 0.2 : 1; // wind-up then open
     }
 
-    // landing squash
+    // landing squash (a big splat that springs back)
     if (landSpring > 0) {
-      const k = landSpring / 360;
-      pose.sx = 1 + 0.18 * k; pose.sy = 1 - 0.18 * k;
+      const k = landSpring / 420;
+      pose.sx = 1 + 0.26 * k; pose.sy = 1 - 0.26 * k;
     }
 
     // jump-bite: a quick upward lunge that snaps at the cursor
@@ -239,66 +241,107 @@
       pose.tail = Math.sin(t / 130) * 0.6;
     }
 
-    // ground shadow (skip while dragged/rolled, scale with squash)
-    if (S.state !== 'drag') {
+    // thrown / falling: a flailing, wide-eyed tumble
+    const airborne = cursor.airborne || S.state === 'fall';
+    if (airborne) {
+      pose.step = 1.7;
+      pose.legPhase = (t / 70) % 1;          // legs paddling fast
+      pose.dangle = 0; pose.sit = 0; pose.lift = 0; pose.bob = 0;
+      pose.ear = Math.sin(t / 42) * 1.1;     // ears flapping
+      pose.mouth = 0.8; pose.tongue = 0.65; pose.blink = 0;
+      pose.eyeDx = Math.sin(t / 55) * 1.6; pose.eyeDy = -1;   // wide darting eyes
+      pose.tail = Math.sin(t / 50); pose.headDy = -1;
+      const stretch = Math.min(0.22, (cursor.vmag || 0) / 9000);
+      pose.sy = 1 + stretch; pose.sx = 1 - stretch * 0.7;
+    }
+
+    // ground shadow (skip while held/airborne; scale with squash)
+    if (S.state !== 'drag' && !airborne) {
       const sw = (pose.sx || 1) * (1 - (pose.lift || 0) / 26);
       window.Rio._helpers.ell(bctx, BX - 2, BASE + 3, 13 * sw, 3 * sw, 'rgba(20,15,20,0.24)');
     }
 
     window.Rio.draw(bctx, BX, BASE, pose, t);
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(buf, 0, 0, BUF_W, BUF_H, offX, offY, BUF_W * drawScale, BUF_H * drawScale);
+    if (airborne && Math.abs(cursor.angle || 0) > 0.001) {
+      const pivX = canvas.width / 2, pivY = offY + (BASE - 14) * drawScale;  // tumble about his body
+      ctx.save();
+      ctx.translate(pivX, pivY); ctx.rotate(cursor.angle); ctx.translate(-pivX, -pivY);
+      ctx.drawImage(buf, 0, 0, BUF_W, BUF_H, offX, offY, BUF_W * drawScale, BUF_H * drawScale);
+      ctx.restore();
+    } else {
+      ctx.drawImage(buf, 0, 0, BUF_W, BUF_H, offX, offY, BUF_W * drawScale, BUF_H * drawScale);
+    }
+
+    // dust puff kicked up on landing
+    if (landSpring > 0) drawDust(landSpring / 420);
   }
 
-  // approximate travel speed for leg cadence (px/frame proxy)
-  let _lastCx = 0;
-  function dtSpeed() { return 1; }
+  // dust kicked up where Rio lands; p goes 1 -> 0 over the landing.
+  function drawDust(p) {
+    const feetX = canvas.width / 2;
+    const feetY = offY + BASE * drawScale;
+    const grow = 1 - p;
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, p * 0.5);
+    ctx.fillStyle = '#d8cdba';
+    const puffs = [[-1, 0, 1], [1, -0.15, 0.85], [-0.5, -0.5, 0.6], [0.6, -0.55, 0.7]];
+    for (const [dx, dy, s] of puffs) {
+      const r = (3 + grow * 9) * s * drawScale * 0.5;
+      const px = feetX + dx * (6 + grow * 16) * drawScale * 0.5;
+      const py = feetY + dy * (4 + grow * 6) * drawScale * 0.5 - grow * 2 * drawScale;
+      ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
 
   function applyGaze(pose) {
-    // cursor relative to Rio's head, in buffer space-ish; turn eyes & a little head
+    // turn the eyes a little toward the cursor (window-local coords)
     const f = pose.facing;
-    const headScreenX = offX / drawScale + BX; // not exact; use cursor sign instead
-    const dx = cursor.cx - Wc / 2;
-    const dy = cursor.cy - (Hc - GROUND_PAD - BASE * 0 - 30); // head is up high
-    const ex = Math.max(-1, Math.min(1, dx / 120));
-    const ey = Math.max(-1, Math.min(1, (cursor.cy - (Hc * 0.35)) / 120));
+    const headY = (MARGIN_TOP + BASE - 30) * SCALE;   // roughly where his eyes are
+    const ex = Math.max(-1, Math.min(1, (cursor.cx - Wc / 2) / 120));
+    const ey = Math.max(-1, Math.min(1, (cursor.cy - headY) / 120));
     if (S.state === 'idle' || S.state === 'sit' || S.state === 'walk' || S.state === 'pet') {
       pose.eyeDx = ex * 1.4 * f; pose.eyeDy = ey * 1.2;
     }
   }
 
   // ---- pointer interaction (only fires when main has made us interactive) --
-  let down = false, downX = 0, downY = 0, moved = false, lastPet = 0;
+  // A press becomes a DRAG only after moving >4px or holding >120ms — so a plain
+  // click pets/pokes him instead of yanking him off the floor.
+  let down = false, dragging = false, downX = 0, downY = 0, downT = 0, lastPet = 0;
   const headRegion = () => {
-    // head is toward the facing side, upper area
-    const cssOffX = Wc / 2 - BX * SCALE, cssOffY = (Hc - GROUND_PAD) - BASE * SCALE;
-    const hx = cssOffX + (S.facing >= 0 ? 44 : 8) * SCALE;
-    const hy = cssOffY + 16 * SCALE;
-    return { x: hx, y: hy, r: 12 * SCALE };
+    const cssOffX = Wc / 2 - BX * SCALE, cssOffY = MARGIN_TOP * SCALE;
+    const hx = cssOffX + (S.facing >= 0 ? 52 : 22) * SCALE;   // head is toward the facing side
+    const hy = cssOffY + 18 * SCALE;
+    return { x: hx, y: hy, r: 13 * SCALE };
   };
   function overHead(x, y) { const h = headRegion(); return Math.hypot(x - h.x, y - h.y) < h.r; }
 
   window.addEventListener('mousemove', (e) => {
-    if (down) { if (Math.hypot(e.clientX - downX, e.clientY - downY) > 4) moved = true; return; }
-    // petting: cursor sweeping over the head
-    if (overHead(e.clientX, e.clientY)) {
+    if (down) {
+      if (!dragging && (Math.hypot(e.clientX - downX, e.clientY - downY) > 4 || performance.now() - downT > 120)) {
+        dragging = true; window.rio.dragStart();
+      }
+      return;
+    }
+    if (overHead(e.clientX, e.clientY)) {     // petting: cursor over the head
       const now = performance.now();
       if (now - lastPet > 110) { lastPet = now; resumeAudio(); window.rio.action('pet'); }
     }
   });
   window.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
-    down = true; moved = false; downX = e.clientX; downY = e.clientY;
+    down = true; dragging = false; downX = e.clientX; downY = e.clientY; downT = performance.now();
     resumeAudio();
-    window.rio.dragStart();
   });
   window.addEventListener('mouseup', () => {
     if (!down) return; down = false;
-    window.rio.dragEnd();
-    if (!moved) window.rio.action('poke', { fromLeft: true });
+    if (dragging) { dragging = false; window.rio.dragEnd(); }
+    else window.rio.action('poke', { fromLeft: true });   // a plain click = a poke
   });
   window.addEventListener('dblclick', () => { resumeAudio(); window.rio.action('doubleclick'); });
-  window.addEventListener('blur', () => { if (down) { down = false; window.rio.dragEnd(); } });
+  window.addEventListener('blur', () => { if (down) { down = false; if (dragging) { dragging = false; window.rio.dragEnd(); } } });
 
   // ---- speech bubble -------------------------------------------------------
   let bubbleHideTimer = null;
@@ -337,7 +380,12 @@
   }
 
   // ---- wire up IPC ---------------------------------------------------------
-  window.rio.onTick((tk) => { cursor = tk; });
+  window.rio.onTick((tk) => {
+    cursor = tk;
+    // main is authoritative: if it says the drag ended but our mouseup never
+    // arrived (the window flipped click-through), clear the stuck latch.
+    if (dragging && !tk.dragging) { dragging = false; down = false; }
+  });
   window.rio.onState((st) => {
     S = Object.assign(S, st);
     setBubble(st.bubble || '');

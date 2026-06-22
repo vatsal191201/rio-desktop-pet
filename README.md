@@ -41,7 +41,9 @@ Prefer a real app? See [Building a `.app` / `.dmg`](#building-an-app).
 | Whip the cursor past him | He gives **chase** |
 | Move the cursor right up to him | He **jumps up and bites** at it (`nom!`) |
 | Sweep the cursor over his head | Happy **pet** — tail wag, panting, hearts |
-| Click‑and‑drag him | Picks him up (legs dangle, mochi‑stretch); **drop** him and he bounces down with a squash |
+| Pick him up & **fling** him | He tumbles across the screen — flailing, wide‑eyed, `wheee!` — **bounces off the walls**, and **always lands at the bottom** with a dusty *oof!* |
+| Drop him somewhere | He **stays put** there for a while — a handy way to **move him out of the way** |
+| Plain click / poke | Just a poke — he no longer falls when you only click him |
 | Double‑click him | **Bork!** |
 | Type (optional) | He **taps along**, and **overheats** (panting + sweat) if you type fast |
 | Scroll (optional) | He does a little **spin** |

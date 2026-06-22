@@ -1,0 +1,2 @@
+const http=require('http'),fs=require('fs'),path=require('path');const OUT=path.join(__dirname,'..','shots');fs.mkdirSync(OUT,{recursive:true});
+http.createServer((q,s)=>{s.setHeader('Access-Control-Allow-Origin','*');if(q.method!=='POST'){s.writeHead(200);s.end('up');return;}let b='';q.on('data',c=>b+=c);q.on('end',()=>{try{const{name,dataURL}=JSON.parse(b);fs.writeFileSync(path.join(OUT,(name||'s')+'.png'),Buffer.from(dataURL.replace(/^data:image\/png;base64,/,''),'base64'));s.writeHead(200);s.end('ok')}catch(e){s.writeHead(500);s.end(''+e)}})}).listen(8766);
