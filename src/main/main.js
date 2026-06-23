@@ -59,7 +59,7 @@ function winSize() {
   return { w: Math.round((BUF_W + 2 * MARGIN_X) * s), h: Math.round((BUF_H + MARGIN_TOP + MARGIN_BOT) * s) };
 }
 // the window hangs below the floor by this much so Rio's feet rest exactly on it
-function feetOverhang() { return Math.round((BUF_H - BASE_ROW + MARGIN_BOT) * settings.scale); }
+function feetOverhang() { const s = Number.isFinite(settings.scale) ? settings.scale : 1.5; return Math.round((BUF_H - BASE_ROW + MARGIN_BOT) * s); }
 function roamRange() {
   const ds = screen.getAllDisplays();
   return {
@@ -202,9 +202,12 @@ function loop() {
   const p = screen.getCursorScreenPoint();
   const c = brain.cursor;
   const ndt = Math.max(1, dt) / 1000;
-  c.vx = (p.x - c.x) / ndt; c.vy = (p.y - c.y) / ndt;
-  c.speed = Math.hypot(c.vx, c.vy);
-  c.x = p.x; c.y = p.y;
+  // ignore a non-finite cursor reading (can happen on sleep/wake / no display)
+  if (Number.isFinite(p.x) && Number.isFinite(p.y)) {
+    c.vx = (p.x - c.x) / ndt; c.vy = (p.y - c.y) / ndt;
+    c.speed = Math.hypot(c.vx, c.vy);
+    c.x = p.x; c.y = p.y;
+  } else { c.vx = 0; c.vy = 0; c.speed = 0; }
   // smoothed cursor velocity — the basis for "throw" strength on release
   if (!Number.isFinite(c.vx)) c.vx = 0; if (!Number.isFinite(c.vy)) c.vy = 0;
   brain.svx = brain.svx * 0.6 + c.vx * 0.4;
@@ -441,17 +444,22 @@ function applyMovement(dt) {
     const p = placeForCenter(b.x + b.w / 2, b.y + b.h);
     b.x = p.x; b.y = p.y;
   }
-  // last line of defence: if anything ever produced a non-finite position,
-  // recover to a safe on-screen spot instead of crashing setPosition.
+  // recover to a safe on-screen spot if anything produced a non-finite position
   if (!Number.isFinite(b.x) || !Number.isFinite(b.y)) {
     const wa = screen.getPrimaryDisplay().workArea;
-    b.x = wa.x + Math.round(wa.width / 2 - b.w / 2);
-    b.y = wa.y + wa.height - b.h + feetOverhang();
+    const w = Number.isFinite(b.w) ? b.w : 110, h = Number.isFinite(b.h) ? b.h : 140;
+    b.x = wa.x + Math.round(wa.width / 2 - w / 2);
+    b.y = wa.y + Math.round(wa.height * 0.7);
     b.vx = 0; b.vy = 0; b.svx = 0; b.svy = 0; b.angle = 0; b.angVel = 0;
     b.falling = false; b.dragging = false;
     recoveries++;
   }
-  petWin.setPosition(Math.round(b.x), Math.round(b.y));
+  // ABSOLUTE last line: a finite integer ALWAYS reaches the OS (NaN here is the
+  // "conversion failure" crash). Falls back to a safe point if all else failed.
+  const wa2 = screen.getPrimaryDisplay().workArea;
+  const px = Number.isFinite(b.x) ? Math.round(b.x) : wa2.x + 40;
+  const py = Number.isFinite(b.y) ? Math.round(b.y) : wa2.y + 40;
+  if (petWin && !petWin.isDestroyed()) petWin.setPosition(px, py);
 }
 
 // click-through toggle + hover reactions (using the global cursor vs the dog's
@@ -911,7 +919,10 @@ function runStress() {
       else if (r < 0.845) setScale([1, 1.5, 2, 3][(Math.random() * 4) | 0]); // rebuildWindow (heavy)
       else if (r < 0.87) { settings.mute = !settings.mute; pushConfig(); }
       else if (r < 0.88) handleAction(pick(['pet', 'poke', 'doubleclick', 'bark', 'paw']), { fromLeft: Math.random() < 0.5 });
-      else if (r < 0.93) { const fld = pick(['x', 'y', 'svx', 'svy', 'vx', 'vy', 'angle']); b[fld] = Math.random() < 0.5 ? NaN : Infinity; } // inject non-finite to test recovery
+      else if (r < 0.93) { // inject non-finite into position-deriving fields (incl. w/h/scale) to test the crash-proof guard
+        if (Math.random() < 0.8) { const fld = pick(['x', 'y', 'svx', 'svy', 'vx', 'vy', 'angle', 'w', 'h']); b[fld] = Math.random() < 0.5 ? NaN : Infinity; }
+        else settings.scale = NaN;
+      }
     } catch (e) { driverErrs++; console.error('[stress] driver threw:', e && e.stack || e); }
     assertInvariants();
   }, 80);
