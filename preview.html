@@ -2,12 +2,15 @@
 <html><head><meta charset="utf-8"><title>rio</title>
 <style>html,body{margin:0;background:#3b4654;}canvas{image-rendering:pixelated;display:block;}</style>
 </head><body>
-<canvas id="sheet" width="1000" height="820"></canvas>
+<canvas id="sheet" width="1000" height="1000"></canvas>
 <script src="src/renderer/rio.js"></script>
 <script>
 const BW=72,BH=60,BX=37,BASE=50;
 const POSES = [
   ['idle', p => {}],
+  ['FLY', p => { p.fly=1; p.ear=-0.7; p.mouth=0.4; p.tongue=0.5; p.capeStream=1; p.capeFy=0.1; p.headDy=-2; p.sx=1.15; p.sy=0.92; }],
+  ['FLY PANIC', p => { p.fly=1; p.panic=1; p.ear=-0.4; p.mouth=0.6; p.tongue=0.4; p.eyeDy=-1; p.capeStream=1; p.capeFy=0.1; p.headDy=-2; }],
+  ['READ', p => { p.sit=1; p.glasses=1; p.book=1; p.bookFlip=0.5; p.ear=0.25; p.headDy=2; p.mouth=0.05; }],
   ['blink', p => { p.blink=1; }],
   ['walk a', p => { p.step=1; p.legPhase=0; p.tail=0.4; p.ear=0.4; }],
   ['walk b', p => { p.step=1; p.legPhase=0.25; p.bob=-1; p.tail=-0.3; p.ear=0.1; }],

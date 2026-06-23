@@ -55,6 +55,7 @@
     sit: 0, lie: 0, curl: 0, roll: 0, paw: 0, scratch: 0,
     mouth: 0, tongue: 0, ear: 0.35, headUp: 0, lift: 0, dangle: 0,
     stretch: 0, playbow: 0, beg: 0, dig: 0, overheat: 0,
+    fly: 0, glasses: 0, book: 0,
     sx: 1, heart: 0, sparkle: 0, think: 0, run: 0,
   };
   function lerp(a, b, t) { return a + (b - a) * t; }
@@ -86,7 +87,8 @@
       case 'spin': T.ear = 0.6; T.mouth = 0.4; T.tongue = 0.5; break;
       case 'shake': T.ear = 0.8; T.mouth = 0.2; break;
       case 'think': T.sit = 1; T.think = 1; T.ear = -0.35; T.headUp = 0.4; break;
-      case 'drag': T.dangle = 1; T.ear = 1; T.tongue = 0.7; T.mouth = 0.25; break;
+      case 'drag': T.fly = 1; T.ear = -0.7; T.tongue = 0.5; T.mouth = 0.4; break;     // SUPERMAN
+      case 'read': T.sit = 1; T.glasses = 1; T.book = 1; T.ear = 0.25; T.headUp = -0.25; T.mouth = 0.05; break;
       case 'fall': T.ear = 0; T.mouth = 0.7; T.tongue = 0.6; T.dangle = 0; break;
       case 'land': T.ear = 0.5; T.mouth = 0.2; break;
       case 'idle': default: T.ear = 0.35; break;
@@ -109,7 +111,7 @@
     const T = targetsFor(S.state);
     const k = 1 - Math.pow(0.001, dt / 1000);   // ~ time-based smoothing
     for (const key of ['sit', 'lie', 'curl', 'roll', 'paw', 'scratch', 'ear', 'headUp', 'lift', 'dangle',
-      'think', 'run', 'stretch', 'playbow', 'beg', 'dig', 'overheat']) {
+      'think', 'run', 'stretch', 'playbow', 'beg', 'dig', 'overheat', 'fly', 'glasses', 'book']) {
       A[key] = lerp(A[key], T[key], Math.min(1, k * 1.7));
     }
     A.mouth = lerp(A.mouth, T.mouth, Math.min(1, k * 2.4));
@@ -155,6 +157,15 @@
     pose.beg = A.beg;
     pose.dig = A.dig; pose.digPhase = t / 45;
     pose.overheat = A.overheat;
+    pose.fly = A.fly; pose.glasses = A.glasses; pose.book = A.book;
+    if (S.state === 'read') pose.bookFlip = (t / 240) % 1;
+
+    // ---- cape streaming (always worn; streams with motion) ----
+    const movingNow = (S.state === 'walk' || S.state === 'come' || S.state === 'chase' || S.state === 'celebrate');
+    pose.cape = cfgCape; pose.capeFx = -1; pose.capeFy = 0.45; pose.capeStream = 0.5;
+    if (S.state === 'drag' || A.fly > 0.3 || S.state === 'fall' || cursor.airborne) {
+      pose.capeStream = 1; pose.capeFy = 0.1;        // streams dramatically while flying/thrown
+    } else if (movingNow) { pose.capeStream = 0.72; }
 
     // breathing / idle life
     const breathing = (S.state === 'idle' || S.state === 'sit') ? Math.sin(t / 620) * 0.6 : 0;
@@ -218,6 +229,13 @@
     // gaze: eyes/head follow the cursor (in window-local space)
     applyGaze(pose);
 
+    // "notices you": when the cursor is near/over him, perk the ears and look
+    const near = cursor.near || 0;
+    if (near > 0.05 && (S.state === 'idle' || S.state === 'sit' || S.state === 'walk' || S.state === 'pet')) {
+      pose.ear = Math.min(pose.ear, -0.2 * near);     // ears perk up toward the cursor
+      pose.headTilt = (pose.headTilt || 0) + 0.12 * near;
+    }
+
     // sniffing: head dips and bobs at the ground
     if (A.headUp < -0.2) { pose.headDy = 4 * -A.headUp + Math.sin(t / 160) * 1; pose.headTilt = -0.1; }
     // looking up at a cursor that's above
@@ -234,19 +252,29 @@
     // blink (not while sleeping which is already closed)
     if (blinking > 0 && S.state !== 'nap' && S.state !== 'sleep') pose.blink = 1;
 
-    // dragged "mochi" wobble
+    // SUPERMAN flying while held + PANIC on grab (the scared-but-soaring gag)
     if (S.state === 'drag') {
-      pose.sy = 1.06 + Math.sin(t / 110) * 0.05;
-      pose.sx = 1 / pose.sy;
-      pose.tail = Math.sin(t / 130) * 0.6;
+      const spd = Math.hypot(cursor.dvx || 0, cursor.dvy || 0);
+      const streak = Math.min(1, spd / 1300);
+      pose.headDy = -2;                                   // chin up, heroic
+      pose.sx = 1 + 0.22 * streak; pose.sy = 1 - 0.1 * streak;
+      if (streak < 0.18) pose.bob = Math.sin(t / 420) * 1.8;   // gentle hover when still
+      const panicAge = t - stateEnter;
+      const panic = Math.max(Math.max(0, 1 - panicAge / 1100), 0.22 * (1 - streak));
+      if (panic > 0.05) {
+        pose.panic = panic;                              // rig: bulging eyes + "!"
+        pose.mouth = Math.max(pose.mouth, 0.55); pose.tongue = 0.35; pose.blink = 0;
+        pose.eyeDx = Math.sin(t / 50) * 1.6 * panic; pose.eyeDy = -1;
+        if (panic > 0.5) pose.headDx = Math.sign(Math.sin(t / 90)) * 2;   // frantic head turns
+      }
     }
 
-    // thrown / falling: a flailing, wide-eyed tumble
+    // thrown / falling: a flailing, wide-eyed tumble (cape streams via channels)
     const airborne = cursor.airborne || S.state === 'fall';
     if (airborne) {
       pose.step = 1.7;
       pose.legPhase = (t / 70) % 1;          // legs paddling fast
-      pose.dangle = 0; pose.sit = 0; pose.lift = 0; pose.bob = 0;
+      pose.dangle = 0; pose.sit = 0; pose.lift = 0; pose.bob = 0; pose.fly = 0;
       pose.ear = Math.sin(t / 42) * 1.1;     // ears flapping
       pose.mouth = 0.8; pose.tongue = 0.65; pose.blink = 0;
       pose.eyeDx = Math.sin(t / 55) * 1.6; pose.eyeDy = -1;   // wide darting eyes
@@ -263,10 +291,14 @@
 
     window.Rio.draw(bctx, BX, BASE, pose, t);
     ctx.imageSmoothingEnabled = false;
-    if (airborne && Math.abs(cursor.angle || 0) > 0.001) {
-      const pivX = canvas.width / 2, pivY = offY + (BASE - 14) * drawScale;  // tumble about his body
+    // rotation: tumble while thrown, bank with vertical drag while flying
+    let rot = 0;
+    if (airborne) rot = cursor.angle || 0;
+    else if (S.state === 'drag') rot = Math.max(-0.45, Math.min(0.45, (cursor.dvy || 0) / 700)) * (pose.facing >= 0 ? 1 : -1);
+    if (Math.abs(rot) > 0.001) {
+      const pivX = canvas.width / 2, pivY = offY + (BASE - 14) * drawScale;  // pivot about his body
       ctx.save();
-      ctx.translate(pivX, pivY); ctx.rotate(cursor.angle); ctx.translate(-pivX, -pivY);
+      ctx.translate(pivX, pivY); ctx.rotate(rot); ctx.translate(-pivX, -pivY);
       ctx.drawImage(buf, 0, 0, BUF_W, BUF_H, offX, offY, BUF_W * drawScale, BUF_H * drawScale);
       ctx.restore();
     } else {
@@ -358,7 +390,7 @@
   }
 
   // ---- synthesized dog sounds (WebAudio, no asset files) -------------------
-  let actx = null, muted = false;
+  let actx = null, muted = false, cfgCape = true;
   function resumeAudio() { if (actx && actx.state === 'suspended') actx.resume(); }
   function ensureAudio() { if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch {} } return actx; }
   function sound(kind) {
@@ -390,12 +422,12 @@
     S = Object.assign(S, st);
     setBubble(st.bubble || '');
   });
-  window.rio.onConfig((cfg) => { muted = !!cfg.mute; if (cfg.name) S.name = cfg.name; fit(); });
+  window.rio.onConfig((cfg) => { muted = !!cfg.mute; if (cfg.cape !== undefined) cfgCape = !!cfg.cape; if (cfg.name) S.name = cfg.name; fit(); });
   window.rio.onCommand((c) => { if (c && c.bubble != null) setBubble(c.bubble); });
 
   window.addEventListener('resize', fit);
   fit();
   window.rio.ready();
-  window.rio.getConfig().then((cfg) => { if (cfg) { muted = !!cfg.mute; S.name = cfg.name || S.name; fit(); } });
+  window.rio.getConfig().then((cfg) => { if (cfg) { muted = !!cfg.mute; if (cfg.cape !== undefined) cfgCape = !!cfg.cape; S.name = cfg.name || S.name; fit(); } });
   requestAnimationFrame(frame);
 })();

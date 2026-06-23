@@ -26,7 +26,7 @@ app.on('second-instance', () => { if (petWin) summon(); });
 const SETTINGS_FILE = () => path.join(app.getPath('userData'), 'rio-settings.json');
 const DEFAULTS = {
   name: 'friend', scale: 1.5, mute: true, followCursor: true,
-  biteCursor: true, reactKeyboard: true, stretchEvery: 25,
+  biteCursor: true, reactKeyboard: true, stretchEvery: 25, cape: true,
   agentEnabled: true, agentPort: 4279, accessPrompted: false,
 };
 let settings = { ...DEFAULTS };
@@ -105,13 +105,14 @@ function newBrain() {
     zoomDir: 1, zoomLeft: 0,
     lastBite: 0, keyUntil: 0, keyHot: false, scrollUntil: 0, lastScrollSpin: 0, spinFlip: 0,
     settledUntil: 0,                // stays put after being placed (move out of the way)
+    overDog: false, wasOverDog: false, cursorDist: 9999, lastHoverPet: 0,
     lastSentState: '', lastBubbleSent: '',
   };
 }
 
 // states that are "busy" — autonomous decisions & cursor-chase are suppressed
 const RESTING = new Set(['sit', 'nap', 'sleep', 'scratch', 'sniff', 'paw', 'rollover', 'think', 'pet',
-  'beg', 'stretch', 'playbow', 'dig', 'type', 'overheat', 'spin']);
+  'beg', 'stretch', 'playbow', 'dig', 'type', 'overheat', 'spin', 'read']);
 const ONESHOT = new Set(['bark', 'paw', 'rollover', 'land', 'bite', 'shake']);   // play once, then resolve
 
 function setState(s, hold) {
@@ -210,6 +211,7 @@ function think(dt) {
   if (b.dragging) {
     b.x = b.cursor.x - b.dragOffset.x;
     b.y = b.cursor.y - b.dragOffset.y;
+    if (Math.abs(b.svx) > 60) b.facing = b.svx >= 0 ? 1 : -1;   // face the flight direction
     if (b.state !== 'drag') setState('drag');
     return;
   }
@@ -284,10 +286,13 @@ function think(dt) {
   if (now() < b.keyUntil && !RESTING.has(b.state)) { setState(b.keyHot ? 'overheat' : 'type'); return; }
   if ((b.state === 'type' || b.state === 'overheat') && now() >= b.keyUntil) setState('idle');
 
-  // 4d) Scrolling makes him spin once (with a cooldown so it isn't spammy).
-  if (now() < b.scrollUntil && !RESTING.has(b.state) && now() - b.lastScrollSpin > 2600) {
-    b.lastScrollSpin = now(); b.spinFlip = now(); setState('spin'); return;
+  // 4d) Scrolling -> Rio puts on reading glasses and flips through a book.
+  if (now() < b.scrollUntil && !b.dragging) {
+    if (b.state !== 'read') { setState('read'); say(pick(['hmm…', 'interesting', 'page-turner!', '*flip flip*']), 2000); }
+    b.hold = (b.scrollUntil - now()) + 300;
+    return;
   }
+  if (b.state === 'read') setState('idle');
 
   // 5) Cursor chase — fast movement near Rio makes him give chase.
   if (settings.followCursor && !RESTING.has(b.state)) {
@@ -409,20 +414,47 @@ function applyMovement(dt) {
   petWin.setPosition(Math.round(b.x), Math.round(b.y));
 }
 
-// click-through toggle (using the global cursor vs the dog's hitbox) ----------
+// click-through toggle + hover reactions (using the global cursor vs the dog's
+// hitbox — reliable, doesn't depend on the renderer receiving DOM mouse events).
 function updateClickThrough() {
   const b = brain;
-  let over = false;
+  let over = false, dist = 9999;
   if (b.hitbox) {
     const lx = b.cursor.x - b.x, ly = b.cursor.y - b.y; // cursor in window CSS px
     const hb = b.hitbox;
     over = lx >= hb.x && lx <= hb.x + hb.w && ly >= hb.y && ly <= hb.y + hb.h;
+    // distance from the cursor to the dog's box (0 when inside) — for "near" reactions
+    const ddx = Math.max(hb.x - lx, 0, lx - (hb.x + hb.w));
+    const ddy = Math.max(hb.y - ly, 0, ly - (hb.y + hb.h));
+    dist = Math.hypot(ddx, ddy);
   }
+  b.overDog = over; b.cursorDist = dist;
+
   const wantIgnore = !over && !b.dragging;
   if (wantIgnore !== b.ignore) {
     b.ignore = wantIgnore;
     petWin.setIgnoreMouseEvents(wantIgnore, wantIgnore ? { forward: true } : undefined);
   }
+
+  // ---- hover / pet reactions ----
+  if (!b.dragging && !b.falling) {
+    if (over) {
+      // stroking him (cursor moving over the dog) makes him happy
+      if (b.cursor.speed > 22 && now() - b.lastHoverPet > 80) {
+        b.lastHoverPet = now();
+        b.mood = Math.min(1, b.mood + 0.02);
+        b.settledUntil = 0;
+        if (!RESTING.has(b.state) || ['sit', 'idle', 'walk', 'pet', 'look'].includes(b.state)) setState('pet', 1100);
+        if (Math.random() < 0.01) say(pick(['<3', '*happy*', 'arf!', 'hehe']), 1400);
+      } else if (!b.wasOverDog && ['idle', 'sit', 'walk'].includes(b.state)) {
+        setState('pet', 900);     // just hovered onto him -> notices you
+      }
+    } else if (dist < 130 && !RESTING.has(b.state) && b.state !== 'pet') {
+      // cursor NEAR him -> turn to face it & perk up (handled in the renderer too)
+      b.facing = (b.cursor.x >= centerX()) ? 1 : -1;
+    }
+  }
+  b.wasOverDog = over;
 }
 
 function sendTick() {
@@ -431,6 +463,9 @@ function sendTick() {
     cx: b.cursor.x - b.x, cy: b.cursor.y - b.y, speed: b.cursor.speed,
     dragging: b.dragging, airborne: b.falling, angle: b.angle,
     vmag: Math.hypot(b.vx, b.vy),
+    over: b.overDog, near: Math.max(0, Math.min(1, 1 - b.cursorDist / 130)),
+    // drag velocity drives the flying lean + cape stream
+    dvx: b.dragging ? b.svx : b.vx, dvy: b.dragging ? b.svy : b.vy,
   });
 }
 
@@ -479,7 +514,7 @@ ipcMain.handle('rio:get-config', () => configPayload());
 
 function configPayload() {
   const { w, h } = winSize();
-  return { name: settings.name, scale: settings.scale, mute: settings.mute, w, h };
+  return { name: settings.name, scale: settings.scale, mute: settings.mute, w, h, cape: settings.cape };
 }
 function pushConfig() { if (petWin && !petWin.isDestroyed()) petWin.webContents.send('rio:config', configPayload()); }
 
@@ -534,6 +569,8 @@ function rebuildTray() {
     { label: 'React to typing', type: 'checkbox', checked: settings.reactKeyboard,
       click: (mi) => { settings.reactKeyboard = mi.checked; saveSettings(); restartInputHooks(); rebuildTray();
         if (mi.checked && !accessibilityTrusted()) grantAccessibility(); } },
+    { label: 'Super cape 🦸', type: 'checkbox', checked: settings.cape,
+      click: (mi) => { settings.cape = mi.checked; saveSettings(); pushConfig(); } },
     ...(settings.reactKeyboard && !accessibilityTrusted()
       ? [{ label: 'Grant typing access…', click: grantAccessibility }] : []),
     { label: 'Sounds', type: 'checkbox', checked: !settings.mute,
@@ -668,7 +705,7 @@ function startInputHooks() {
       brain.keyUntil = t + 650;
       brain.keyHot = keyTimes.length >= 8;   // typing fast -> overheat
     });
-    u.on('wheel', () => { if (brain && !brain.dragging) brain.scrollUntil = now() + 450; });
+    u.on('wheel', () => { if (brain && !brain.dragging) brain.scrollUntil = now() + 1100; });
     u.start();
     uioOn = true; log('input hooks on');
   } catch (e) { uioOn = false; log('input hooks failed', e && e.message); return; }
@@ -751,12 +788,17 @@ app.whenReady().then(() => {
       }).catch(() => {});
     };
     setTimeout(() => cap('launch'), 1400);
-    setTimeout(() => { brain.dragging = false; brain.falling = true; brain.vx = 1300; brain.vy = -980; brain.angVel = 9; brain.bounces = 0; setState('fall'); }, 1800);
-    setTimeout(() => cap('air1'), 2000);
-    setTimeout(() => cap('air2'), 2230);
-    setTimeout(() => cap('air3'), 2470);
-    setTimeout(() => cap('land'), 2780);
-    setTimeout(() => { app.isQuitting = true; app.quit(); }, 3400);
+    setTimeout(() => { brain.dragging = true; brain.dragOffset = { x: 0, y: 0 }; brain.svx = 900; setState('drag'); }, 1800);
+    setTimeout(() => cap('fly_grab'), 2120);                 // flying + panic (just grabbed)
+    setTimeout(() => cap('fly_hero'), 3050);                 // panic faded, fast flight
+    setTimeout(() => { brain.svx = 4; }, 3200);              // hover -> terrified leak
+    setTimeout(() => cap('fly_hover'), 3650);
+    setTimeout(() => { brain.dragging = false; brain.svx = 0; brain.scrollUntil = Date.now() + 4000; }, 4000);
+    setTimeout(() => cap('read'), 4650);
+    setTimeout(() => { brain.scrollUntil = 0; brain.dragging = false; brain.falling = true; brain.vx = 1300; brain.vy = -980; brain.angVel = 9; brain.bounces = 0; setState('fall'); }, 5050);
+    setTimeout(() => cap('throw'), 5300);
+    setTimeout(() => cap('land'), 5650);
+    setTimeout(() => { app.isQuitting = true; app.quit(); }, 6200);
   }
 });
 

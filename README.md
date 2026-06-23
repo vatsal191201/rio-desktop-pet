@@ -13,7 +13,7 @@ every pose is drawn in code, modelled after a real dog named **Rio**.
 
 > A weekend hobby project. 🐶
 
-![Rio's moods](shots/rio_preview_05.png)
+![Super Rio's moods](shots/rio_moods.png)
 
 ---
 
@@ -41,12 +41,14 @@ Prefer a real app? See [Building a `.app` / `.dmg`](#building-an-app).
 | Whip the cursor past him | He gives **chase** |
 | Move the cursor right up to him | He **jumps up and bites** at it (`nom!`) |
 | Sweep the cursor over his head | Happy **pet** — tail wag, panting, hearts |
-| Pick him up & **fling** him | He tumbles across the screen — flailing, wide‑eyed, `wheee!` — **bounces off the walls**, and **always lands at the bottom** with a dusty *oof!* |
+| Pick him up & drag | 🦸 He goes into a **Superman flying pose** — cape streaming, paws out front — while **panicking** (saucer eyes + `!`): scared‑but‑soaring |
+| …then **fling** him | He tumbles across the screen — flailing, `wheee!` — **bounces off the walls**, and **always lands at the bottom** with a dusty *oof!* |
 | Drop him somewhere | He **stays put** there for a while — a handy way to **move him out of the way** |
 | Plain click / poke | Just a poke — he no longer falls when you only click him |
+| Hover / stroke over him | Reacts happily (tail wag, hearts); ears perk when the cursor is near |
 | Double‑click him | **Bork!** |
 | Type (optional) | He **taps along**, and **overheats** (panting + sweat) if you type fast |
-| Scroll (optional) | He does a little **spin** |
+| Scroll (optional) | He puts on **reading glasses** 🤓 and flips through a **book** |
 | Leave him alone | He wanders, sits, **begs**, **stretches**, **play‑bows**, **digs**, scratches, sniffs, rolls over, or **curls up for a nap** (💤) |
 | Every ~25 min | He nudges you with a **stretch break** (a literal downward dog) |
 

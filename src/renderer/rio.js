@@ -41,6 +41,14 @@
     TAG:  '#f2c24e', // collar tag gold
     TAGS: '#c9962f', // tag shadow
     BELLY:'#90581f', // belly tan — kept dark so light brown stays minimal
+    CAPE: '#e2362f', // superhero cape (brighter than the collar)
+    CAPED:'#a31d18', // cape fold / shadow
+    CAPEH:'#f26a5f', // cape highlight ridge
+    GLASS:'#23202a', // reading-glasses frame
+    LENS: '#bfe6f4', // glasses lens glint
+    BOOKC:'#3f6fb0', // book cover (blue)
+    BOOKP:'#f4ede0', // book pages (cream)
+    BOOKE:'#c7b9a0', // book page edges
   };
 
   // ---- Low-level raster helpers -------------------------------------------
@@ -70,6 +78,35 @@
   }
   // A thick capsule stroke from (x0,y0) to (x1,y1), radius r — used for legs,
   // ears and the tail.
+  // A flowing superhero cape: a chain from the shoulder anchor that blends from
+  // gravity (hangs) toward the flow direction (streams) with a perpendicular
+  // billow that grows toward the free end. Rendered as a tapering ribbon.
+  function drawCape(ctx, ax, ay, fx, fy, stream, billow, t) {
+    const N = 7, seg = 4.6;
+    // rest direction trails BACK and down (fx is already facing-adjusted, points behind)
+    const bx = fx, by = 0.55;                      // resting drape: backward + down
+    let dx = bx * (1 - stream) + fx * stream;
+    let dy = by * (1 - stream) + fy * stream;
+    const dl = Math.hypot(dx, dy) || 1; dx /= dl; dy /= dl;
+    const perpx = -dy, perpy = dx;
+    const pts = [];
+    let x = ax, y = ay;
+    for (let i = 0; i <= N; i++) {
+      const tt = i / N;
+      const amp = (0.8 + tt * tt * 4.6) * (0.4 + billow * 1.8);
+      const wave = Math.sin(t / 100 + i * 0.95) * amp;
+      const droop = (1 - stream) * tt * tt * 4.0;       // the free end sags under gravity
+      pts.push({ x: x + perpx * wave, y: y + perpy * wave + droop, w: 9.5 - tt * 6.5 });
+      x += dx * seg; y += dy * seg;
+    }
+    for (let i = 0; i < N; i++) { const a = pts[i], b = pts[i + 1]; cap(ctx, a.x, a.y + 1, b.x, b.y + 1, Math.max(1.5, a.w / 2), PAL.CAPED); } // fold shadow
+    for (let i = 0; i < N; i++) { const a = pts[i], b = pts[i + 1]; cap(ctx, a.x, a.y, b.x, b.y, Math.max(1, a.w / 2 - 0.7), PAL.CAPE); }     // cape face
+    for (let i = 1; i < N; i++) { const a = pts[i]; px(ctx, a.x, a.y, PAL.CAPED); }                                                           // centre crease
+    for (let i = 0; i < 4; i++) { const a = pts[i]; px(ctx, a.x + perpx * (a.w / 2 - 1), a.y + perpy * (a.w / 2 - 1), PAL.CAPEH); }           // ridge highlight
+    ell(ctx, ax, ay, 2.6, 2.2, PAL.CAPE);                                                                                                     // shoulder clasp
+    ell(ctx, ax, ay, 1.2, 1.2, PAL.TAG);
+  }
+
   function cap(ctx, x0, y0, x1, y1, r, c) {
     const dx = x1 - x0, dy = y1 - y0;
     const len = Math.max(1, Math.hypot(dx, dy));
@@ -120,6 +157,15 @@
       scratchPhase: 0,// rapid scratch oscillation
       overheat: 0,    // 0..1 hot & bothered — sweat drops + steam
       excite: 0,      // 0..1 little excited hop bounce
+      cape: true,     // wears a little superhero cape
+      capeFx: -1,     // cape flow direction x, LOCAL (-1 = trails behind him)
+      capeFy: 0.4,    // cape flow direction y (some downward droop)
+      capeStream: 0.5, // 0 = hangs straight down, 1 = streams dramatically
+      fly: 0,         // 0..1 superman flying pose (front paws forward, legs trailing)
+      panic: 0,       // 0..1 panicky flailing (wide eyes, sweat, "!")
+      glasses: 0,     // 0..1 reading glasses on
+      book: 0,        // 0..1 holding an open book
+      bookFlip: 0,    // page-flip phase
       collar: true,
     };
   }
@@ -156,11 +202,20 @@
     const RBX = 15 * sx, RBY = (8.5 + lie * 1.5) * sy;
 
     // ---------------------------------------------------------------------
+    // 0) CAPE — drawn behind everything, streaming from the shoulder.
+    // ---------------------------------------------------------------------
+    if (pose.cape && lie < 0.5 && (pose.curl || 0) < 0.5) {
+      drawCape(ctx, X(8), bodyCY - RBY + 1, (pose.capeFx || 0) * f, (pose.capeFy || 1),
+        pose.capeStream || 0, (pose.capeStream || 0) * 0.85 + 0.12, t);
+    }
+
+    // ---------------------------------------------------------------------
     // 1) FAR-SIDE LEGS (drawn first, darker, slightly inset so they read as
     //    being behind the torso).
     // ---------------------------------------------------------------------
     const gait = (pose.step || 0);
     const hang = pose.dangle || 0;          // legs hang straight down when held
+    const fly = pose.fly || 0;              // superman pose: front paws forward, back legs trailing
     const ph = (pose.legPhase || 0) * Math.PI * 2;
     // leg swing helpers: returns {fx, fy} foot offset for a given phase
     function swing(phase, amp) {
@@ -176,7 +231,10 @@
 
     if (lie < 0.5) {
       // far back leg (folds flat under the body when sitting)
-      if (sit > 0.3) {
+      if (fly > 0.5) {
+        cap(ctx, X(HIP_BB), bodyCY + 2, X(-18), bodyCY - 1, legR, PAL.TF);   // trails back
+        ell(ctx, X(-18), bodyCY - 1, 2.4, 1.7, PAL.TD);
+      } else if (sit > 0.3) {
         cap(ctx, X(-11), bodyCY + 5 + sit * 5, X(-2), baseY, legR, PAL.TF);
         ell(ctx, X(-2), baseY, 2.8, 1.8, PAL.TD);
       } else {
@@ -184,9 +242,12 @@
         cap(ctx, X(HIP_BB), bodyCY + 3, X(HIP_BB) + f * sb.fx, footY + sb.fy, legR, PAL.TF);
         ell(ctx, X(HIP_BB) + f * sb.fx, footY + sb.fy, 2.6, 1.8, PAL.TD);
       }
-      // far front leg (also begs / digs)
+      // far front leg (also begs / digs / flies)
       const beg = pose.beg || 0, dig = pose.dig || 0;
-      if (beg > 0.1) {
+      if (fly > 0.5) {
+        cap(ctx, X(HIP_FB), bodyCY + 2, X(18), bodyCY - 3, legR, PAL.TF);    // thrusts forward
+        ell(ctx, X(18), bodyCY - 3, 2.4, 1.7, PAL.TD);
+      } else if (beg > 0.1) {
         const fx2 = X(HIP_FB + 5), fy2 = bodyCY + 1 - beg * 4;
         cap(ctx, X(HIP_FB), bodyCY + 3, fx2, fy2, legR, PAL.TF);
         ell(ctx, fx2, fy2, 2.4, 1.7, PAL.TD);
@@ -228,6 +289,15 @@
     // chest bulge at the front (lifts up when sitting proud)
     ell(ctx, X(11), bodyCY + 1 - sit * 3, 5.5, 6.5 - lie * 1 + sit * 1.5, PAL.T);
     ell(ctx, X(12), bodyCY + 3 - sit * 3, 4, 4.5, PAL.BELLY);
+    // super emblem on the chest (gold shield + tiny bone)
+    if (pose.cape) {
+      const exx = X(12), eyy = bodyCY + 1 - sit * 3;
+      ell(ctx, exx, eyy, 3, 3.6, PAL.OUT);
+      ell(ctx, exx, eyy, 2.1, 2.7, PAL.TAG);
+      fr(ctx, exx - 1, eyy, 3, 1, PAL.BOOKP);
+      px(ctx, exx - 1, eyy - 1, PAL.BOOKP); px(ctx, exx - 1, eyy + 1, PAL.BOOKP);
+      px(ctx, exx + 1, eyy - 1, PAL.BOOKP); px(ctx, exx + 1, eyy + 1, PAL.BOOKP);
+    }
     // black saddle: an ellipse riding high on the back, smaller so tan shows
     // at chest and belly.
     ell(ctx, X(-3), bodyCY - 3 + lie * 2, RBX - 1, RBY - 1.5, PAL.K);
@@ -274,6 +344,11 @@
         footX = X(hipx + 13 + vib * 0.3);
         footYp = bodyCY - 3 - u * 4 + vib;
         hy = bodyCY + 2;
+      }
+      // flying superman pose: front paws thrust forward, back legs trail back
+      if (fly > 0.5) {
+        if (opts.paw) { footX = X(hipx + 14); footYp = bodyCY - 1; hy = bodyCY + 2; }
+        else { footX = X(-16); footYp = bodyCY + 1; hy = bodyCY + 3; }
       }
       cap(ctx, X(hipx), hy, footX, footYp, 2.7, PAL.T);
       // knee/shading
@@ -362,12 +437,30 @@
     // eye
     const blink = pose.blink || 0;
     const ex = hcx + f * 2.5, ey = hcy - 0.5;
+    const pan = pose.panic || 0;
     if (blink > 0.55) {
       fr(ctx, ex - 2, ey, 3, 1, PAL.OUT); // closed eye line
+    } else if (pan > 0.25) {
+      // terrified saucer eye: big white, tiny darting pupil
+      const er = 2.4 + pan * 1.2;
+      ell(ctx, ex, ey, er + 0.6, er + 0.8, PAL.OUT);
+      ell(ctx, ex, ey, er, er + 0.3, PAL.EYEW);
+      ell(ctx, ex + f * (pose.eyeDx || 0) * 0.8, ey + (pose.eyeDy || 0) * 0.6, 1.0, 1.2, PAL.EYE);
     } else {
       ell(ctx, ex, ey, 2.1, 2.3, PAL.OUT); // eye socket
       ell(ctx, ex + f * (pose.eyeDx || 0) * 0.6, ey + (pose.eyeDy || 0) * 0.6, 1.4, 1.7, PAL.EYE);
       px(ctx, ex + f * 1, ey - 1, PAL.EYEW); // shine
+    }
+    // reading glasses
+    if ((pose.glasses || 0) > 0.3) {
+      ell(ctx, ex, ey, 3.2, 3.2, PAL.GLASS);     // near lens frame
+      ell(ctx, ex, ey, 2.2, 2.2, PAL.LENS);
+      ell(ctx, ex, ey, 1.1, 1.3, PAL.EYE);       // eye through the lens
+      px(ctx, ex - f * 1, ey - 1, PAL.EYEW);     // glint
+      fr(ctx, ex + f * 3, ey - 1, 2, 1, PAL.GLASS); // bridge
+      ell(ctx, ex + f * 6, ey - 0.5, 2.6, 2.6, PAL.GLASS); // far lens
+      ell(ctx, ex + f * 6, ey - 0.5, 1.6, 1.6, PAL.LENS);
+      cap(ctx, ex - f * 2, ey - 1, ex - f * 6, ey - 2, 0.8, PAL.GLASS); // temple arm to ear
     }
 
     // ---- NEAR EAR (floppy, in front, hangs by the cheek) ----
@@ -389,6 +482,28 @@
     if ((pose.zzz || 0) > 0.05)   drawZzz(ctx, X(20), hcy - 10, t, pose.zzz);
     if ((pose.sparkle || 0) > 0.05) drawSparkle(ctx, X(20), hcy - 9, t, pose.sparkle);
     if ((pose.overheat || 0) > 0.05) drawOverheat(ctx, hcx, hcy, t, pose.overheat, f);
+    if ((pose.panic || 0) > 0.4)  { drawBang(ctx, X(19), hcy - 13, t); drawOverheat(ctx, hcx, hcy, t, pose.panic * 0.7, f); }
+    if ((pose.book || 0) > 0.3)   drawBook(ctx, X(14), bodyCY + 3, f, t, pose.bookFlip || 0);
+  }
+
+  function drawBang(ctx, x, y, t) {
+    const pop = (Math.sin(t / 90) + 1) / 2;
+    const yy = y - pop * 1.5;
+    fr(ctx, x, yy, 1, 3, PAL.CAPE); fr(ctx, x, yy + 4, 1, 1, PAL.CAPE);   // exclamation
+    px(ctx, x - 1, yy - 1, '#fff'); px(ctx, x + 1, yy, PAL.CAPED);
+  }
+
+  function drawBook(ctx, x, y, f, t, flip) {
+    fr(ctx, x - 6, y - 4, 12, 8, PAL.BOOKC);        // cover
+    fr(ctx, x - 5, y - 3, 11, 6, PAL.BOOKP);        // pages
+    fr(ctx, x - 1, y - 4, 1, 8, PAL.BOOKC);         // spine
+    for (let i = 0; i < 2; i++) { fr(ctx, x - 4, y - 2 + i * 2, 3, 1, PAL.BOOKE); fr(ctx, x + 1, y - 2 + i * 2, 3, 1, PAL.BOOKE); }
+    if (flip > 0.02) {                              // a page lifting & turning over
+      const lift = Math.sin(flip * Math.PI) * 5;
+      const tx = x - 1 + (flip - 0.5) * 9;
+      cap(ctx, x - 1, y - 3, tx, y - 3 - lift, 0.9, PAL.BOOKP);
+      ell(ctx, tx, y - 3 - lift, 1.3, 1.7, PAL.BOOKP);
+    }
   }
 
   function drawOverheat(ctx, hcx, hcy, t, a, f) {
