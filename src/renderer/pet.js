@@ -23,7 +23,7 @@
 
   function fit() {
     dpr = Math.max(1, Math.round(window.devicePixelRatio || 1));
-    Wc = window.innerWidth; Hc = window.innerHeight;
+    Wc = Math.max(1, window.innerWidth); Hc = Math.max(1, window.innerHeight);  // guard 0-size (hidden window)
     SCALE = Wc / (BUF_W + 2 * MARGIN_X);   // may be fractional (e.g. 1.5); crisp on Retina
     drawScale = SCALE * dpr;
     canvas.width = Math.round(Wc * dpr);
@@ -98,9 +98,14 @@
 
   // ---- timers & procedural motion -----------------------------------------
   let t = 0, blinkTimer = 1500 + Math.random() * 2500, blinking = 0;
-  let legPhase = 0, lastState = '', stateEnter = 0, landSpring = 0, pawWave = 0, lastDt = 16;
+  let legPhase = 0, lastState = '', stateEnter = 0, landSpring = 0, pawWave = 0, lastDt = 16, capeAmt = 0;
 
   function frame(ts) {
+    try { frameBody(ts); }
+    catch (e) { try { window.rio.logError('frame: ' + (e && e.stack || e)); } catch {} }
+    requestAnimationFrame(frame);   // keep the loop alive even if a frame throws
+  }
+  function frameBody(ts) {
     const now = ts || 0;
     const dt = Math.min(50, frame._last ? now - frame._last : 16);
     frame._last = now; t += dt; lastDt = dt;
@@ -127,8 +132,11 @@
     if (landSpring > 0) landSpring = Math.max(0, landSpring - dt);
 
     render();
-    requestAnimationFrame(frame);
   }
+
+  // report any stray renderer exception to main (rAF + listeners swallow them)
+  window.addEventListener('error', (e) => { try { window.rio.logError('error: ' + (e.message || '') + ' @' + (e.filename || '') + ':' + (e.lineno || '')); } catch {} });
+  window.addEventListener('unhandledrejection', (e) => { try { window.rio.logError('reject: ' + (e.reason && e.reason.message || e.reason)); } catch {} });
 
   function onEnterState(st) {
     if (st === 'bark') { sound('bark'); }
@@ -160,12 +168,13 @@
     pose.fly = A.fly; pose.glasses = A.glasses; pose.book = A.book;
     if (S.state === 'read') pose.bookFlip = (t / 240) % 1;
 
-    // ---- cape streaming (always worn; streams with motion) ----
-    const movingNow = (S.state === 'walk' || S.state === 'come' || S.state === 'chase' || S.state === 'celebrate');
-    pose.cape = cfgCape; pose.capeFx = -1; pose.capeFy = 0.45; pose.capeStream = 0.5;
-    if (S.state === 'drag' || A.fly > 0.3 || S.state === 'fall' || cursor.airborne) {
-      pose.capeStream = 1; pose.capeFy = 0.1;        // streams dramatically while flying/thrown
-    } else if (movingNow) { pose.capeStream = 0.72; }
+    // ---- cape: a FLIGHT cape — deploys when he takes off (dragged/thrown),
+    //      furls away when he lands. ----
+    const flyingNow = (S.state === 'drag' || cursor.airborne || S.state === 'fall' || A.fly > 0.1);
+    const capeWant = (cfgCape && flyingNow) ? 1 : 0;
+    capeAmt += (capeWant - capeAmt) * Math.min(1, lastDt / 130);   // ease in/out over ~130ms
+    pose.cape = cfgCape; pose.capeAmt = capeAmt;
+    pose.capeFx = -1; pose.capeFy = 0.1; pose.capeStream = 1;       // always streaming while shown
 
     // breathing / idle life
     const breathing = (S.state === 'idle' || S.state === 'sit') ? Math.sin(t / 620) * 0.6 : 0;
@@ -367,13 +376,17 @@
     down = true; dragging = false; downX = e.clientX; downY = e.clientY; downT = performance.now();
     resumeAudio();
   });
+  let pokeTimer = null;
   window.addEventListener('mouseup', () => {
     if (!down) return; down = false;
     if (dragging) { dragging = false; window.rio.dragEnd(); }
-    else window.rio.action('poke', { fromLeft: true });   // a plain click = a poke
+    else { clearTimeout(pokeTimer); pokeTimer = setTimeout(() => window.rio.action('poke', { fromLeft: true }), 240); }  // defer; cancel on dblclick
   });
-  window.addEventListener('dblclick', () => { resumeAudio(); window.rio.action('doubleclick'); });
-  window.addEventListener('blur', () => { if (down) { down = false; if (dragging) { dragging = false; window.rio.dragEnd(); } } });
+  window.addEventListener('dblclick', () => { clearTimeout(pokeTimer); resumeAudio(); window.rio.action('doubleclick'); });
+  const release = () => { if (down) { down = false; if (dragging) { dragging = false; window.rio.dragEnd(); } } };
+  window.addEventListener('blur', release);
+  window.addEventListener('mouseleave', release);
+  document.addEventListener('pointercancel', release);
 
   // ---- speech bubble -------------------------------------------------------
   let bubbleHideTimer = null;
@@ -417,6 +430,7 @@
     // main is authoritative: if it says the drag ended but our mouseup never
     // arrived (the window flipped click-through), clear the stuck latch.
     if (dragging && !tk.dragging) { dragging = false; down = false; }
+    if (down && !tk.dragging && performance.now() - downT > 6000) { down = false; dragging = false; }  // watchdog
   });
   window.rio.onState((st) => {
     S = Object.assign(S, st);

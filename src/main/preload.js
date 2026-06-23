@@ -24,4 +24,7 @@ contextBridge.exposeInMainWorld('rio', {
 
   // request/response
   getConfig: () => ipcRenderer.invoke('rio:get-config'),
+
+  // surface renderer exceptions to the main process (rAF would swallow them)
+  logError: (msg) => ipcRenderer.send('rio:error', String(msg).slice(0, 500)),
 });

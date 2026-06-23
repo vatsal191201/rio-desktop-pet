@@ -81,8 +81,9 @@
   // A flowing superhero cape: a chain from the shoulder anchor that blends from
   // gravity (hangs) toward the flow direction (streams) with a perpendicular
   // billow that grows toward the free end. Rendered as a tapering ribbon.
-  function drawCape(ctx, ax, ay, fx, fy, stream, billow, t) {
-    const N = 7, seg = 4.6;
+  function drawCape(ctx, ax, ay, fx, fy, stream, billow, t, amt) {
+    amt = amt === undefined ? 1 : amt;        // 0 = furled away, 1 = full cape
+    const N = 7, seg = 4.6 * amt;
     // rest direction trails BACK and down (fx is already facing-adjusted, points behind)
     const bx = fx, by = 0.55;                      // resting drape: backward + down
     let dx = bx * (1 - stream) + fx * stream;
@@ -96,7 +97,7 @@
       const amp = (0.8 + tt * tt * 4.6) * (0.4 + billow * 1.8);
       const wave = Math.sin(t / 100 + i * 0.95) * amp;
       const droop = (1 - stream) * tt * tt * 4.0;       // the free end sags under gravity
-      pts.push({ x: x + perpx * wave, y: y + perpy * wave + droop, w: 9.5 - tt * 6.5 });
+      pts.push({ x: x + perpx * wave, y: y + perpy * wave + droop, w: (9.5 - tt * 6.5) * amt });
       x += dx * seg; y += dy * seg;
     }
     for (let i = 0; i < N; i++) { const a = pts[i], b = pts[i + 1]; cap(ctx, a.x, a.y + 1, b.x, b.y + 1, Math.max(1.5, a.w / 2), PAL.CAPED); } // fold shadow
@@ -161,6 +162,7 @@
       capeFx: -1,     // cape flow direction x, LOCAL (-1 = trails behind him)
       capeFy: 0.4,    // cape flow direction y (some downward droop)
       capeStream: 0.5, // 0 = hangs straight down, 1 = streams dramatically
+      capeAmt: 1,      // 0 = furled/hidden, 1 = full (the app retracts it on landing)
       fly: 0,         // 0..1 superman flying pose (front paws forward, legs trailing)
       panic: 0,       // 0..1 panicky flailing (wide eyes, sweat, "!")
       glasses: 0,     // 0..1 reading glasses on
@@ -204,9 +206,10 @@
     // ---------------------------------------------------------------------
     // 0) CAPE — drawn behind everything, streaming from the shoulder.
     // ---------------------------------------------------------------------
-    if (pose.cape && lie < 0.5 && (pose.curl || 0) < 0.5) {
+    const capeAmt = pose.capeAmt === undefined ? 1 : pose.capeAmt;
+    if (pose.cape && capeAmt > 0.03 && lie < 0.5 && (pose.curl || 0) < 0.5) {
       drawCape(ctx, X(8), bodyCY - RBY + 1, (pose.capeFx || 0) * f, (pose.capeFy || 1),
-        pose.capeStream || 0, (pose.capeStream || 0) * 0.85 + 0.12, t);
+        pose.capeStream || 0, (pose.capeStream || 0) * 0.85 + 0.12, t, capeAmt);
     }
 
     // ---------------------------------------------------------------------
@@ -289,8 +292,8 @@
     // chest bulge at the front (lifts up when sitting proud)
     ell(ctx, X(11), bodyCY + 1 - sit * 3, 5.5, 6.5 - lie * 1 + sit * 1.5, PAL.T);
     ell(ctx, X(12), bodyCY + 3 - sit * 3, 4, 4.5, PAL.BELLY);
-    // super emblem on the chest (gold shield + tiny bone)
-    if (pose.cape) {
+    // super emblem on the chest (gold shield + tiny bone) — shows with the cape
+    if (pose.cape && capeAmt > 0.3) {
       const exx = X(12), eyy = bodyCY + 1 - sit * 3;
       ell(ctx, exx, eyy, 3, 3.6, PAL.OUT);
       ell(ctx, exx, eyy, 2.1, 2.7, PAL.TAG);

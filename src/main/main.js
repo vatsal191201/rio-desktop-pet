@@ -33,6 +33,10 @@ let settings = { ...DEFAULTS };
 function loadSettings() {
   try { settings = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8')) }; }
   catch { settings = { ...DEFAULTS }; }
+  // validate (a garbled file with scale:0/NaN would make a 0-size window)
+  if (![1, 1.5, 2, 3].includes(settings.scale)) settings.scale = 1.5;
+  if (!Number.isInteger(settings.agentPort) || settings.agentPort < 1024 || settings.agentPort > 65535) settings.agentPort = 4279;
+  if (!Number.isFinite(settings.stretchEvery) || settings.stretchEvery < 0) settings.stretchEvery = 25;
 }
 function saveSettings() {
   try { fs.writeFileSync(SETTINGS_FILE(), JSON.stringify(settings, null, 2)); } catch (e) { log('save fail', e); }
@@ -68,7 +72,10 @@ function roamRange() {
 // no sliding into dead space between monitors.
 function placeForCenter(centerX, feetY, w, h) {
   w = w || brain.w; h = h || brain.h;
-  const disp = screen.getDisplayNearestPoint({ x: Math.round(centerX), y: Math.round(feetY || 0) });
+  // never let a non-finite input reach the OS (it crashes setPosition)
+  if (!Number.isFinite(centerX)) centerX = (brain && Number.isFinite(brain.x)) ? brain.x + w / 2 : screen.getPrimaryDisplay().workArea.x + w;
+  if (!Number.isFinite(feetY)) feetY = (brain && Number.isFinite(brain.y)) ? brain.y + h : screen.getPrimaryDisplay().workArea.y + h;
+  const disp = screen.getDisplayNearestPoint({ x: Math.round(centerX), y: Math.round(feetY) });
   const wa = disp.workArea;
   const cx = Math.max(wa.x + w / 2, Math.min(wa.x + wa.width - w / 2, centerX));
   return { x: cx - w / 2, y: wa.y + wa.height - h + feetOverhang(), disp, wa };
@@ -79,6 +86,8 @@ function placeForCenter(centerX, feetY, w, h) {
 // ---------------------------------------------------------------------------
 let petWin = null;
 let brain = null;
+let rendererErrors = 0;   // counts exceptions surfaced from the renderer
+let recoveries = 0;       // counts non-finite-position auto-recoveries
 function newBrain() {
   const { w, h } = winSize();
   const sp = screen.getCursorScreenPoint();
@@ -160,11 +169,13 @@ function createWindow() {
 }
 
 function rebuildWindow() {
-  // size changes recreate the window (resizing a transparent macOS window is buggy)
+  // size changes recreate the window (resizing a transparent macOS window is buggy).
+  // End any in-progress drag/throw first so the new brain doesn't strand him.
+  if (brain && (brain.dragging || brain.falling)) { brain.dragging = false; brain.falling = false; }
   const old = petWin;
-  const keepX = brain ? brain.x : undefined;
+  const keepX = (brain && Number.isFinite(brain.x)) ? brain.x : undefined;
   createWindow();
-  if (keepX != null) brain.x = keepX;
+  if (keepX != null) { const p = placeForCenter(keepX + brain.w / 2, brain.y + brain.h); brain.x = p.x; brain.y = p.y; }
   if (old && !old.isDestroyed()) old.destroy();
 }
 
@@ -187,8 +198,11 @@ function loop() {
   c.speed = Math.hypot(c.vx, c.vy);
   c.x = p.x; c.y = p.y;
   // smoothed cursor velocity — the basis for "throw" strength on release
+  if (!Number.isFinite(c.vx)) c.vx = 0; if (!Number.isFinite(c.vy)) c.vy = 0;
   brain.svx = brain.svx * 0.6 + c.vx * 0.4;
   brain.svy = brain.svy * 0.6 + c.vy * 0.4;
+  if (!Number.isFinite(brain.svx)) brain.svx = 0;
+  if (!Number.isFinite(brain.svy)) brain.svy = 0;
 
   think(dt);
   applyMovement(dt);
@@ -227,7 +241,8 @@ function think(dt) {
     b.angVel *= (1 - 0.8 * dts);
     // bounce off the left/right edges of the whole desktop
     const range = roamRange();
-    if (b.x < range.min) { b.x = range.min; b.vx = Math.abs(b.vx) * 0.5; b.angVel = -b.angVel * 0.6; if (b.stateTime > 120) say('bonk!', 700); }
+    if (range.max - range.min <= b.w) { b.vx = 0; b.x = range.min; }   // no room to bounce
+    else if (b.x < range.min) { b.x = range.min; b.vx = Math.abs(b.vx) * 0.5; b.angVel = -b.angVel * 0.6; if (b.stateTime > 120) say('bonk!', 700); }
     else if (b.x > range.max - b.w) { b.x = range.max - b.w; b.vx = -Math.abs(b.vx) * 0.5; b.angVel = -b.angVel * 0.6; if (b.stateTime > 120) say('bonk!', 700); }
     // floor of the display under him
     const fp = placeForCenter(b.x + b.w / 2, b.y + b.h);
@@ -270,7 +285,7 @@ function think(dt) {
   }
 
   // 4b) Jump-bite — the cursor got too close, so Rio leaps up and snaps at it.
-  if (settings.biteCursor && !RESTING.has(b.state) && b.state !== 'bite') {
+  if (settings.biteCursor && !RESTING.has(b.state) && b.state !== 'bite' && b.state !== 'come') {
     const hx = headCenterX(), hy = b.y + b.h * 0.42;
     const d = Math.hypot(b.cursor.x - hx, b.cursor.y - hy);
     if (d < 48 && now() - b.lastBite > 850) {
@@ -295,7 +310,7 @@ function think(dt) {
   if (b.state === 'read') setState('idle');
 
   // 5) Cursor chase — fast movement near Rio makes him give chase.
-  if (settings.followCursor && !RESTING.has(b.state)) {
+  if (settings.followCursor && !RESTING.has(b.state) && b.state !== 'come') {
     const dist = Math.abs(b.cursor.x - centerX());
     if (b.cursor.speed > 900 && dist < 520 && dist > 60) {
       b.targetX = b.cursor.x - b.w / 2;
@@ -411,6 +426,16 @@ function applyMovement(dt) {
     const p = placeForCenter(b.x + b.w / 2, b.y + b.h);
     b.x = p.x; b.y = p.y;
   }
+  // last line of defence: if anything ever produced a non-finite position,
+  // recover to a safe on-screen spot instead of crashing setPosition.
+  if (!Number.isFinite(b.x) || !Number.isFinite(b.y)) {
+    const wa = screen.getPrimaryDisplay().workArea;
+    b.x = wa.x + Math.round(wa.width / 2 - b.w / 2);
+    b.y = wa.y + wa.height - b.h + feetOverhang();
+    b.vx = 0; b.vy = 0; b.svx = 0; b.svy = 0; b.angle = 0; b.angVel = 0;
+    b.falling = false; b.dragging = false;
+    recoveries++;
+  }
   petWin.setPosition(Math.round(b.x), Math.round(b.y));
 }
 
@@ -510,6 +535,7 @@ ipcMain.on('rio:drag-end', () => {
 ipcMain.on('rio:ready', () => { pushConfig(); pushState(); });
 ipcMain.on('rio:hitbox', (_e, rect) => { if (brain) brain.hitbox = rect; });
 ipcMain.on('rio:action', (_e, { name, data }) => handleAction(name, data));
+ipcMain.on('rio:error', (_e, msg) => { rendererErrors++; console.error('[renderer]', msg); });
 ipcMain.handle('rio:get-config', () => configPayload());
 
 function configPayload() {
@@ -538,8 +564,9 @@ function handleAction(name, data) {
 // Tray menu commands.
 // ---------------------------------------------------------------------------
 function cmdCome() {
+  if (!brain) return;
   const c = screen.getCursorScreenPoint();
-  brain.targetX = c.x - brain.w / 2; brain.agent = null; setState('come');
+  brain.targetX = c.x - brain.w / 2; brain.agent = null; brain.settledUntil = 0; setState('come');
 }
 function rebuildTray() {
   if (!tray) return;
@@ -659,7 +686,7 @@ function restartAgentServer() {
 function onAgentEvent(data) {
   if (!brain || !settings.agentEnabled) return;
   const s = String(data.state || data.event || '').toLowerCase();
-  const msg = data.message || data.tool || '';
+  const msg = String(data.message || data.tool || '').replace(/[\r\n]+/g, ' ').slice(0, 64);  // sanitize + cap
   let kind = null, ttl = 8000, bubble = null;
   if (/(think|busy|work|run|tool|progress|start_tool|pretool)/.test(s)) { kind = 'think'; ttl = 90000; bubble = msg || 'thinking…'; }
   else if (/(done|stop|complete|finish|success|idle)/.test(s)) { kind = 'celebrate'; ttl = 4000; bubble = pick(['all done!', 'finished!', 'we did it!']); }
@@ -775,8 +802,20 @@ app.whenReady().then(() => {
   } catch {}
   // re-assert always-on-top occasionally (macOS can drop the level)
   setInterval(() => { if (petWin && !petWin.isDestroyed()) petWin.setAlwaysOnTop(true, 'screen-saver'); }, 4000);
-  // recompute floor when displays change
-  screen.on('display-metrics-changed', () => {}); screen.on('display-added', () => {}); screen.on('display-removed', () => {});
+  // recompute placement when monitors change (unplug/replug/resolution)
+  const onDisplayChange = () => {
+    if (!brain || !petWin || petWin.isDestroyed()) return;
+    if (!brain.falling && !brain.dragging) {
+      const p = placeForCenter(brain.x + brain.w / 2, brain.y + brain.h);
+      brain.x = p.x; brain.y = p.y;
+    } else {
+      const r = roamRange();
+      brain.x = Math.max(r.min, Math.min(r.max - brain.w, brain.x));
+    }
+  };
+  screen.on('display-metrics-changed', onDisplayChange);
+  screen.on('display-added', onDisplayChange);
+  screen.on('display-removed', onDisplayChange);
 
   // dev-only: capture frames to verify rendering, then quit.
   if (process.env.RIO_SHOTS) {
@@ -797,10 +836,85 @@ app.whenReady().then(() => {
     setTimeout(() => cap('read'), 4650);
     setTimeout(() => { brain.scrollUntil = 0; brain.dragging = false; brain.falling = true; brain.vx = 1300; brain.vy = -980; brain.angVel = 9; brain.bounces = 0; setState('fall'); }, 5050);
     setTimeout(() => cap('throw'), 5300);
-    setTimeout(() => cap('land'), 5650);
-    setTimeout(() => { app.isQuitting = true; app.quit(); }, 6200);
+    setTimeout(() => cap('landing'), 5750);
+    setTimeout(() => cap('grounded'), 6600);     // settled — cape should be GONE
+    setTimeout(() => { app.isQuitting = true; app.quit(); }, 7100);
   }
+
+  // dev-only: automated STRESS HARNESS — hammers every code path with random
+  // actions while asserting invariants, then prints a PASS/FAIL summary.
+  if (process.env.RIO_STRESS) runStress();
 });
+
+function runStress() {
+  const ALL = ['idle', 'walk', 'come', 'chase', 'celebrate', 'sit', 'nap', 'sleep', 'scratch', 'sniff', 'paw',
+    'beg', 'stretch', 'playbow', 'dig', 'rollover', 'bark', 'bite', 'type', 'overheat', 'spin', 'shake', 'think', 'pet', 'read'];
+  const KNOWN = new Set([...ALL, 'drag', 'fall', 'land']);
+  const dur = parseInt(process.env.RIO_STRESS, 10) > 1 ? parseInt(process.env.RIO_STRESS, 10) : 40000;
+  let ticks = 0, driverErrs = 0, violations = 0, maxAbsX = 0;
+  const visits = {};
+  const startRss = process.memoryUsage().rss;
+  const sample = []; sample.push(startRss);
+
+  function bad(v) { return !Number.isFinite(v); }
+  let nanSeen = 0;
+  function assertInvariants() {
+    const b = brain; if (!b) return;
+    // injected/transient non-finite is recovered by applyMovement next frame —
+    // count it but don't hard-fail (the whole point is it must NOT crash).
+    if (bad(b.x) || bad(b.y) || bad(b.vx) || bad(b.vy) || bad(b.angle) || bad(b.svx) || bad(b.svy)) { nanSeen++; return; }
+    const ds = screen.getAllDisplays();
+    const minX = Math.min(...ds.map(d => d.workArea.x)) - 250;
+    const maxX = Math.max(...ds.map(d => d.workArea.x + d.workArea.width)) + 250;
+    if (b.x < minX || b.x > maxX) { violations++; console.error('[stress] x OUT OF BOUNDS', Math.round(b.x), [Math.round(minX), Math.round(maxX)]); }
+    if (!KNOWN.has(b.state)) { violations++; console.error('[stress] UNKNOWN state', b.state); }
+    if (petWin && petWin.isDestroyed()) { violations++; console.error('[stress] window DESTROYED'); }
+    maxAbsX = Math.max(maxAbsX, Math.abs(b.x));
+    visits[b.state] = (visits[b.state] || 0) + 1;
+  }
+
+  const driver = setInterval(() => {
+    ticks++;
+    try {
+      const r = Math.random(), b = brain;
+      if (!b) return;
+      if (r < 0.24) setState(ALL[(Math.random() * ALL.length) | 0], 150 + Math.random() * 1200);
+      else if (r < 0.40) {
+        if (!b.dragging) { b.dragging = true; b.dragOffset = { x: 0, y: 0 }; b.settledUntil = 0; setState('drag'); }
+        else { b.dragging = false; b.vx = (Math.random() - 0.5) * 6000; b.vy = (Math.random() - 0.6) * 3500; b.svx = b.vx; b.svy = b.vy; b.angVel = b.vx / 130; b.bounces = 0; b.falling = true; setState('fall'); }
+      } else if (r < 0.50) b.scrollUntil = Date.now() + 700;
+      else if (r < 0.62) onAgentEvent({ state: pick(['thinking', 'done', 'notification', 'error', 'session', 'garbage']), message: 'm'.repeat((Math.random() * 80) | 0) });
+      else if (r < 0.72) { b.cursor.x += (Math.random() - 0.5) * 5000; b.cursor.y += (Math.random() - 0.5) * 4000; b.cursor.speed = Math.random() * 6000; }
+      else if (r < 0.76) summon();
+      else if (r < 0.80) { if (petWin && !petWin.isDestroyed()) { petWin.hide(); setTimeout(() => { if (petWin && !petWin.isDestroyed()) petWin.show(); }, 40); } }
+      else if (r < 0.83) { settings.cape = !settings.cape; pushConfig(); }
+      else if (r < 0.845) setScale([1, 1.5, 2, 3][(Math.random() * 4) | 0]); // rebuildWindow (heavy)
+      else if (r < 0.87) { settings.mute = !settings.mute; pushConfig(); }
+      else if (r < 0.88) handleAction(pick(['pet', 'poke', 'doubleclick', 'bark', 'paw']), { fromLeft: Math.random() < 0.5 });
+      else if (r < 0.93) { const fld = pick(['x', 'y', 'svx', 'svy', 'vx', 'vy', 'angle']); b[fld] = Math.random() < 0.5 ? NaN : Infinity; } // inject non-finite to test recovery
+    } catch (e) { driverErrs++; console.error('[stress] driver threw:', e && e.stack || e); }
+    assertInvariants();
+  }, 80);
+
+  const mem = setInterval(() => sample.push(process.memoryUsage().rss), 2000);
+
+  setTimeout(() => {
+    clearInterval(driver); clearInterval(mem);
+    const endRss = process.memoryUsage().rss;
+    const grow = ((endRss - startRss) / 1048576);
+    const pass = rendererErrors === 0 && driverErrs === 0 && violations === 0 && grow < 60;
+    console.log('\n==================== STRESS SUMMARY ====================');
+    console.log('duration(ms):', dur, 'ticks:', ticks);
+    console.log('rendererErrors:', rendererErrors, ' driverErrors:', driverErrs, ' assertionViolations:', violations);
+    console.log('non-finite injected/seen:', nanSeen, ' auto-recoveries:', recoveries, '(crash-fix proof: app survived)');
+    console.log('rss MB start/end:', (startRss / 1048576) | 0, '/', (endRss / 1048576) | 0, ' growth:', grow.toFixed(1), 'MB');
+    console.log('maxAbsX:', maxAbsX | 0, ' statesVisited:', Object.keys(visits).length, '/', ALL.length + 3);
+    console.log('visits:', JSON.stringify(visits));
+    console.log('RESULT:', pass ? 'PASS ✅' : 'FAIL ❌');
+    console.log('=======================================================\n');
+    app.isQuitting = true; setTimeout(() => app.quit(), 300);
+  }, dur);
+}
 
 app.on('window-all-closed', () => { /* tray app — keep running */ });
 app.on('will-quit', () => { globalShortcut.unregisterAll(); stopInputHooks(); if (agentServer) try { agentServer.close(); } catch {} });
