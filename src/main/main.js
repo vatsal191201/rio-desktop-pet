@@ -847,6 +847,7 @@ app.whenReady().then(() => {
 });
 
 function runStress() {
+  const savedSettings = { ...settings };   // restore at the end — the harness must NOT persist random settings
   const ALL = ['idle', 'walk', 'come', 'chase', 'celebrate', 'sit', 'nap', 'sleep', 'scratch', 'sniff', 'paw',
     'beg', 'stretch', 'playbow', 'dig', 'rollover', 'bark', 'bite', 'type', 'overheat', 'spin', 'shake', 'think', 'pet', 'read'];
   const KNOWN = new Set([...ALL, 'drag', 'fall', 'land']);
@@ -912,6 +913,7 @@ function runStress() {
     console.log('visits:', JSON.stringify(visits));
     console.log('RESULT:', pass ? 'PASS ✅' : 'FAIL ❌');
     console.log('=======================================================\n');
+    settings = savedSettings; saveSettings();   // undo any settings the harness changed
     app.isQuitting = true; setTimeout(() => app.quit(), 300);
   }, dur);
 }
