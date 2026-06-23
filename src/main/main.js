@@ -28,6 +28,11 @@ const DEFAULTS = {
   name: 'friend', scale: 1.5, mute: true, followCursor: true,
   biteCursor: true, reactKeyboard: true, stretchEvery: 25, cape: true,
   agentEnabled: true, agentPort: 4279, accessPrompted: false,
+  // subtlety controls (all user-toggleable)
+  calm: false,      // master "minimal & subtle" mode — quiet, mostly still
+  bubbles: true,    // show speech bubbles
+  wander: true,     // roam around the screen vs stay put
+  tricks: true,     // autonomous tricks + zoomies + celebrations
 };
 let settings = { ...DEFAULTS };
 function loadSettings() {
@@ -131,7 +136,10 @@ function setState(s, hold) {
   brain.hold = hold || 0;
   pushState();
 }
-function say(text, ms = 2600) { brain.bubble = text; brain.bubbleUntil = Date.now() + ms; pushState(); }
+function say(text, ms = 2600) {
+  if (!settings.bubbles || settings.calm) return;   // subtle/minimal => no speech bubbles
+  brain.bubble = text; brain.bubbleUntil = Date.now() + ms; pushState();
+}
 
 function pushState() {
   if (!petWin || petWin.isDestroyed()) return;
@@ -285,7 +293,7 @@ function think(dt) {
   }
 
   // 4b) Jump-bite — the cursor got too close, so Rio leaps up and snaps at it.
-  if (settings.biteCursor && !RESTING.has(b.state) && b.state !== 'bite' && b.state !== 'come') {
+  if (settings.biteCursor && !settings.calm && !RESTING.has(b.state) && b.state !== 'bite' && b.state !== 'come') {
     const hx = headCenterX(), hy = b.y + b.h * 0.42;
     const d = Math.hypot(b.cursor.x - hx, b.cursor.y - hy);
     if (d < 48 && now() - b.lastBite > 850) {
@@ -298,11 +306,11 @@ function think(dt) {
   }
 
   // 4c) Typing reaction (needs the optional input hook) — tap along, overheat if fast.
-  if (now() < b.keyUntil && !RESTING.has(b.state)) { setState(b.keyHot ? 'overheat' : 'type'); return; }
+  if (now() < b.keyUntil && !settings.calm && !RESTING.has(b.state)) { setState(b.keyHot ? 'overheat' : 'type'); return; }
   if ((b.state === 'type' || b.state === 'overheat') && now() >= b.keyUntil) setState('idle');
 
   // 4d) Scrolling -> Rio puts on reading glasses and flips through a book.
-  if (now() < b.scrollUntil && !b.dragging) {
+  if (now() < b.scrollUntil && !b.dragging && !settings.calm) {
     if (b.state !== 'read') { setState('read'); say(pick(['hmm…', 'interesting', 'page-turner!', '*flip flip*']), 2000); }
     b.hold = (b.scrollUntil - now()) + 300;
     return;
@@ -310,7 +318,7 @@ function think(dt) {
   if (b.state === 'read') setState('idle');
 
   // 5) Cursor chase — fast movement near Rio makes him give chase.
-  if (settings.followCursor && !RESTING.has(b.state) && b.state !== 'come') {
+  if (settings.followCursor && !settings.calm && !RESTING.has(b.state) && b.state !== 'come') {
     const dist = Math.abs(b.cursor.x - centerX());
     if (b.cursor.speed > 900 && dist < 520 && dist > 60) {
       b.targetX = b.cursor.x - b.w / 2;
@@ -347,34 +355,40 @@ function think(dt) {
 
 function decide() {
   const b = brain;
-  b.nextDecision = 2600 + Math.random() * 4200;
-  // gentle energy drift: resting restores, activity drains
+  const calm = settings.calm;
+  // Calm mode: very infrequent, only gentle resting; stays put.
+  b.nextDecision = calm ? (12000 + Math.random() * 16000) : (2600 + Math.random() * 4200);
   const r = Math.random();
   const tired = b.energy < 0.35;
-  if (tired) {
-    // wind down to a nap
+  if (tired || calm) {
+    // wind down to a nap / quiet sit (the only autonomous actions in calm mode)
     b.energy = Math.min(1, b.energy + 0.05);
-    setState(Math.random() < 0.6 ? 'nap' : 'sleep', 6000 + Math.random() * 8000);
-    if (Math.random() < 0.5) say('zzz...', 3000);
+    if (calm && r < 0.5) setState('sit', 8000 + Math.random() * 12000);
+    else setState(Math.random() < 0.6 ? 'nap' : 'sleep', 8000 + Math.random() * 10000);
     return;
   }
   if (RESTING.has(b.state)) { b.energy = Math.min(1, b.energy + 0.08); }
-  if (r < 0.26) {                 // wander
+
+  const canWander = settings.wander;
+  const canTrick = settings.tricks;
+
+  if (canWander && r < 0.26) {                 // wander
     const range = roamRange();
     const span = 160 + Math.random() * 320;
     let tx = b.x + (Math.random() < 0.5 ? -span : span);
     tx = Math.max(range.min, Math.min(range.max - b.w, tx));
     b.targetX = tx; setState('walk'); b.energy = Math.max(0, b.energy - 0.08);
-  } else if (r < 0.40) { setState('sit', 3000 + Math.random() * 4000); }
-  else if (r < 0.49) { setState('sniff', 2200); }
-  else if (r < 0.57) { setState('scratch', 1800); }
-  else if (r < 0.65) { setState('nap', 7000 + Math.random() * 8000); }
-  else if (r < 0.71) { setState('stretch', 3200); say(pick(['*big stretch*', 'mmmf~']), 2200); }
-  else if (r < 0.77) { setState('playbow', 2400); say(pick(["let's play!", 'play with me?']), 2200); }
-  else if (r < 0.82) { setState('beg', 2600); say(pick(['treat? 🦴', 'pretty please?']), 2400); }
-  else if (r < 0.87) { setState('dig', 2200); say(pick(['dig dig dig', '*scratch scratch*']), 1800); }
-  else if (r < 0.91) { setState('idle', 2400); b.facing = Math.random() < 0.5 ? 1 : -1; pushState(); }
-  else if (r < 0.96) { setState('rollover', 2600); say(pick(['rub my belly?', '<3']), 2400); }
+  } else if (r < 0.42) { setState('sit', 3000 + Math.random() * 4000); }
+  else if (r < 0.55) { setState('nap', 7000 + Math.random() * 8000); }
+  else if (r < 0.66) { setState('idle', 2400); b.facing = Math.random() < 0.5 ? 1 : -1; pushState(); }
+  else if (!canTrick) { setState('sit', 3000 + Math.random() * 3000); }   // tricks off -> just rest
+  else if (r < 0.72) { setState('sniff', 2200); }
+  else if (r < 0.78) { setState('scratch', 1800); }
+  else if (r < 0.83) { setState('stretch', 3200); say(pick(['*big stretch*', 'mmmf~']), 2200); }
+  else if (r < 0.88) { setState('playbow', 2400); say(pick(["let's play!", 'play with me?']), 2200); }
+  else if (r < 0.92) { setState('beg', 2600); say(pick(['treat? 🦴', 'pretty please?']), 2400); }
+  else if (r < 0.96) { setState('dig', 2200); say(pick(['dig dig dig', '*scratch scratch*']), 1800); }
+  else if (r < 0.98) { setState('rollover', 2600); say(pick(['rub my belly?', '<3']), 2400); }
   else { setState('bark', 360); say('woof!', 1200); }
 }
 
@@ -398,10 +412,11 @@ function agentThink(dt) {
   if (a.kind === 'think') {
     if (b.state !== 'think') setState('think');
   } else if (a.kind === 'celebrate') {
-    if (b.state !== 'celebrate') { setState('celebrate'); b.zoomLeft = 1500; b.targetX = null; }
-    celebrate(dt);
+    // subtle when calm / tricks off: a happy sit instead of zoomies
+    if (settings.calm || !settings.tricks) { if (b.state !== 'pet') setState('pet', 1800); }
+    else { if (b.state !== 'celebrate') { setState('celebrate'); b.zoomLeft = 1500; b.targetX = null; } celebrate(dt); }
   } else if (a.kind === 'alert') {
-    if (b.state !== 'bark') setState('bark', 420);
+    if (b.state !== (settings.calm ? 'pet' : 'bark')) setState(settings.calm ? 'pet' : 'bark', settings.calm ? 1200 : 420);
   } else if (a.kind === 'greet') {
     if (b.state !== 'pet') setState('pet', 1800);
   } else if (a.kind === 'whine') {
@@ -573,6 +588,9 @@ function rebuildTray() {
   const m = Menu.buildFromTemplate([
     { label: `🐾 Rio`, enabled: false },
     { type: 'separator' },
+    { label: settings.calm ? 'Calm mode 🌙 — ON (subtle)' : 'Calm mode 🌙', type: 'checkbox', checked: settings.calm,
+      click: (mi) => { settings.calm = mi.checked; saveSettings(); rebuildTray();
+        if (mi.checked && brain) { brain.agent = null; brain.targetX = null; setState('sit', 6000); } } },
     { label: 'Come here', click: cmdCome },
     { label: 'Tricks', submenu: [
       { label: 'Sit', click: () => { brain.agent = null; setState('sit', 6000); } },
@@ -589,21 +607,22 @@ function rebuildTray() {
       { label: 'Zoomies!', click: () => { brain.agent = null; setState('celebrate'); brain.zoomLeft = 2200; brain.targetX = null; } },
     ] },
     { type: 'separator' },
-    { label: 'Follow the cursor', type: 'checkbox', checked: settings.followCursor,
-      click: (mi) => { settings.followCursor = mi.checked; saveSettings(); } },
-    { label: 'Bite at the cursor', type: 'checkbox', checked: settings.biteCursor,
-      click: (mi) => { settings.biteCursor = mi.checked; saveSettings(); } },
-    { label: 'React to typing', type: 'checkbox', checked: settings.reactKeyboard,
-      click: (mi) => { settings.reactKeyboard = mi.checked; saveSettings(); restartInputHooks(); rebuildTray();
-        if (mi.checked && !accessibilityTrusted()) grantAccessibility(); } },
+    { label: 'Behaviour', submenu: [
+      { label: 'Wander around', type: 'checkbox', checked: settings.wander, click: (mi) => { settings.wander = mi.checked; saveSettings(); } },
+      { label: 'Follow the cursor', type: 'checkbox', checked: settings.followCursor, click: (mi) => { settings.followCursor = mi.checked; saveSettings(); } },
+      { label: 'Bite at the cursor', type: 'checkbox', checked: settings.biteCursor, click: (mi) => { settings.biteCursor = mi.checked; saveSettings(); } },
+      { label: 'Tricks & zoomies', type: 'checkbox', checked: settings.tricks, click: (mi) => { settings.tricks = mi.checked; saveSettings(); } },
+      { label: 'Speech bubbles', type: 'checkbox', checked: settings.bubbles, click: (mi) => { settings.bubbles = mi.checked; saveSettings(); } },
+      { label: 'React to typing', type: 'checkbox', checked: settings.reactKeyboard,
+        click: (mi) => { settings.reactKeyboard = mi.checked; saveSettings(); restartInputHooks(); rebuildTray(); if (mi.checked && !accessibilityTrusted()) grantAccessibility(); } },
+      ...(settings.reactKeyboard && !accessibilityTrusted() ? [{ label: 'Grant typing access…', click: grantAccessibility }] : []),
+      { label: 'React to Claude Code', type: 'checkbox', checked: settings.agentEnabled,
+        click: (mi) => { settings.agentEnabled = mi.checked; saveSettings(); restartAgentServer(); } },
+    ] },
     { label: 'Super cape 🦸', type: 'checkbox', checked: settings.cape,
       click: (mi) => { settings.cape = mi.checked; saveSettings(); pushConfig(); } },
-    ...(settings.reactKeyboard && !accessibilityTrusted()
-      ? [{ label: 'Grant typing access…', click: grantAccessibility }] : []),
     { label: 'Sounds', type: 'checkbox', checked: !settings.mute,
       click: (mi) => { settings.mute = !mi.checked; saveSettings(); pushConfig(); } },
-    { label: 'React to Claude Code', type: 'checkbox', checked: settings.agentEnabled,
-      click: (mi) => { settings.agentEnabled = mi.checked; saveSettings(); restartAgentServer(); } },
     { label: 'Size', submenu: [
       { label: 'Tiny', type: 'radio', checked: settings.scale === 1, click: () => setScale(1) },
       { label: 'Small', type: 'radio', checked: settings.scale === 1.5, click: () => setScale(1.5) },
@@ -790,7 +809,7 @@ app.whenReady().then(() => {
   // periodic stretch-break nudge — a literal downward dog to remind you too
   let lastStretch = Date.now();
   setInterval(() => {
-    if (!brain || brain.dragging || brain.agent || petWin == null) return;
+    if (!brain || brain.dragging || brain.agent || petWin == null || settings.calm) return;
     if (settings.stretchEvery > 0 && Date.now() - lastStretch > settings.stretchEvery * 60000) {
       lastStretch = Date.now();
       setState('stretch', 4500);

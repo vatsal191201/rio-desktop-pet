@@ -43,6 +43,10 @@
       <input id="name" type="text" />
     </div>
     <div class="row">
+      <div><label>🌙 Calm mode</label><div class="hint">minimal &amp; subtle — quiet, mostly still, reacts only to you</div></div>
+      <input id="calm" type="checkbox" />
+    </div>
+    <div class="row">
       <div><label>Size</label></div>
       <select id="scale">
         <option value="1">Tiny</option>
@@ -50,6 +54,18 @@
         <option value="2">Medium</option>
         <option value="3">Large</option>
       </select>
+    </div>
+    <div class="row">
+      <div><label>Wander around</label><div class="hint">roam the screen vs stay put</div></div>
+      <input id="wander" type="checkbox" />
+    </div>
+    <div class="row">
+      <div><label>Tricks &amp; zoomies</label><div class="hint">autonomous beg/roll/dig/celebrate</div></div>
+      <input id="tricks" type="checkbox" />
+    </div>
+    <div class="row">
+      <div><label>Speech bubbles</label><div class="hint">show his little messages</div></div>
+      <input id="bubbles" type="checkbox" />
     </div>
     <div class="row">
       <div><label>Follow the cursor</label><div class="hint">chase fast mouse moves</div></div>
@@ -99,6 +115,10 @@
     cur = await window.rioSettings.get();
     $('name').value = cur.name || '';
     $('scale').value = String(cur.scale || 3);
+    $('calm').checked = !!cur.calm;
+    $('wander').checked = !!cur.wander;
+    $('tricks').checked = !!cur.tricks;
+    $('bubbles').checked = !!cur.bubbles;
     $('followCursor').checked = !!cur.followCursor;
     $('biteCursor').checked = !!cur.biteCursor;
     $('reactKeyboard').checked = !!cur.reactKeyboard;
@@ -121,6 +141,10 @@
   async function save(patch) { await window.rioSettings.set(patch); }
   $('name').addEventListener('change', e => save({ name: e.target.value.trim() || 'friend' }));
   $('scale').addEventListener('change', e => save({ scale: parseFloat(e.target.value) }));
+  $('calm').addEventListener('change', e => save({ calm: e.target.checked }));
+  $('wander').addEventListener('change', e => save({ wander: e.target.checked }));
+  $('tricks').addEventListener('change', e => save({ tricks: e.target.checked }));
+  $('bubbles').addEventListener('change', e => save({ bubbles: e.target.checked }));
   $('followCursor').addEventListener('change', e => save({ followCursor: e.target.checked }));
   $('biteCursor').addEventListener('change', e => save({ biteCursor: e.target.checked }));
   $('reactKeyboard').addEventListener('change', async e => { await save({ reactKeyboard: e.target.checked }); refreshAccess(); });
